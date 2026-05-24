@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<index version="1" name="Take">
+  <category name="Take">
+    <reapack name="Take.lua" type="script" desc="Take docked panel">
+      <metadata>
+        <description><![CDATA[Take — the layer between your DAW and the people you make music with.]]></description>
+        <link rel="website">https://take-ebon.vercel.app</link>
+      </metadata>
+      <version name="0.2.1" author="Dead Pixel Design" time="2026-05-23T00:00:00Z">
+        <changelog><![CDATA[Default server URL points at the live Take app.]]></changelog>
+        <source main="main">Take.lua</source>
+      </version>
+      <version name="0.2.0" author="Dead Pixel Design" time="2026-05-22T00:00:00Z">
+        <changelog><![CDATA[Push: render the selected track as a new stem, or render the master as a new rough.]]></changelog>
+        <source main="main">Take.lua</source>
+      </version>
+      <version name="0.1.0" author="Dead Pixel Design" time="2026-05-21T00:00:00Z">
+        <changelog><![CDATA[Token auth, project list, project detail, and pull stem into session.]]></changelog>
+        <source main="main">Take.lua</source>
+      </version>
+    </reapack>
+  </category>
+</index>
