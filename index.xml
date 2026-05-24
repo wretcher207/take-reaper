@@ -6,6 +6,10 @@
         <description><![CDATA[Take — the layer between your DAW and the people you make music with.]]></description>
         <link rel="website">https://take-ebon.vercel.app</link>
       </metadata>
+      <version name="0.4.0" author="Dead Pixel Design" time="2026-05-24T12:00:00Z">
+        <changelog><![CDATA[Voice memos: record a spoken comment from the panel, pinned to the edit cursor on the current rough.]]></changelog>
+        <source main="main">Take.lua</source>
+      </version>
       <version name="0.3.0" author="Dead Pixel Design" time="2026-05-24T00:00:00Z">
         <changelog><![CDATA[Comments: read the project discussion in the panel and drop a comment pinned to the edit cursor on the current rough.]]></changelog>
         <source main="main">Take.lua</source>

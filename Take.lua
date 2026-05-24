@@ -1,5 +1,5 @@
 -- @description Take for Reaper
--- @version 0.3.0
+-- @version 0.4.0
 -- @author Dead Pixel Design
 -- @about
 --   A docked panel that connects this Reaper session to your Take projects.
@@ -7,9 +7,9 @@
 --   projects you collaborate on, pull stems onto tracks at their timecode, and
 --   push back: render the selected track as a new stem, or render the master as
 --   a new rough. Read the project's comments and drop your own from the panel —
---   pinned to the edit cursor on the current rough. Reaper is the only client
---   that touches original WAVs, and it's paid-only — the owner of the project
---   must be on a paid plan.
+--   text or a recorded voice memo — pinned to the edit cursor on the current
+--   rough. Reaper is the only client that touches original WAVs, and it's
+--   paid-only — the owner of the project must be on a paid plan.
 --
 --   Pushes use this project's REAPER render format. Set it to WAV, AIFF, FLAC,
 --   or MP3 in the Render dialog (File > Render) once; Take reuses it.
@@ -35,6 +35,8 @@ local state = {
   push_name = "",
   status = "",
   show_settings = false,
+  recording = false,
+  voice = nil, -- in-flight voice-memo record state (temp track, saved arm, cursor)
 }
 if state.base_url == "" then state.base_url = "https://take-ebon.vercel.app" end
 
@@ -399,6 +401,116 @@ local function post_comment()
   state.status = "Comment posted."
 end
 
+-- Voice memos (spec §2.5, paid §2.11). request signed URL -> PUT the WAV ->
+-- finalize as a voice comment. ext/content-type come from the recorded file +
+-- the request response; the voice-memos bucket accepts wav.
+local function post_voice_memo(file, ext, timestamp_ms)
+  local pid = state.project.id
+  local req_http, req_body = http_post_json(
+    "/api/reaper/projects/" .. pid .. "/voice/request", { ext = ext })
+  if req_http == 401 then state.status = "Token rejected. Check it in Settings."; return end
+  if req_http == 403 then state.status = "This project's owner isn't on a paid plan."; return end
+  if req_http == 400 then state.status = "Recording format not accepted (" .. ext .. ")."; return end
+  if req_http ~= 200 then state.status = "Voice request failed (" .. req_http .. ")."; return end
+  local req = json_decode(req_body)
+  if not req or not req.signedUrl then state.status = "No upload URL returned."; return end
+
+  local up = http_upload(req.signedUrl, file, req.contentType or MIME[ext] or "audio/wav")
+  if up ~= 200 then state.status = "Upload failed (" .. up .. ")."; return end
+
+  local payload = { path = req.path }
+  if timestamp_ms then payload.timestampMs = timestamp_ms end
+  local fin_http = select(1, http_post_json(
+    "/api/reaper/projects/" .. pid .. "/voice/finalize", payload))
+  if fin_http == 403 then state.status = "This project's owner isn't on a paid plan."; return end
+  if fin_http ~= 200 then state.status = "Finalize failed (" .. fin_http .. ")."; return end
+
+  load_comments()
+  state.status = "Voice memo posted."
+end
+
+-- Record from the default audio input onto a throwaway track placed past the end
+-- of the project (so nothing on the timeline is touched), then upload the take's
+-- source file. Two-step: Record arms + rolls; Stop & post stops, uploads, and
+-- tears the temp track down. Record-arm on existing tracks is saved/cleared so
+-- only the temp track captures, and restored on stop — the session is left as it
+-- was. The edit cursor at record-time becomes the comment timestamp.
+local function start_voice_record()
+  if not state.project then state.status = "Open a project first."; return end
+  if state.token == "" then state.status = "Add a token in Settings first."; return end
+  if state.recording then return end
+
+  local v = {}
+  v.cursor = reaper.GetCursorPosition() or 0
+  v.timestamp_ms = state.comment_at_cursor and math.floor(v.cursor * 1000) or nil
+
+  v.count = reaper.CountTracks(0)
+  v.saved_arm = {}
+  for i = 0, v.count - 1 do
+    local t = reaper.GetTrack(0, i)
+    v.saved_arm[i] = reaper.GetMediaTrackInfo_Value(t, "I_RECARM")
+    reaper.SetMediaTrackInfo_Value(t, "I_RECARM", 0)
+  end
+
+  reaper.InsertTrackAtIndex(v.count, false)
+  v.track = reaper.GetTrack(0, v.count)
+  reaper.GetSetMediaTrackInfo_String(v.track, "P_NAME", "Take voice memo (temp)", true)
+  reaper.SetMediaTrackInfo_Value(v.track, "I_RECARM", 1)
+  reaper.SetMediaTrackInfo_Value(v.track, "I_RECINPUT", 0) -- mono hardware input 1
+  reaper.SetMediaTrackInfo_Value(v.track, "I_RECMON", 0)   -- no input monitoring (no feedback)
+  reaper.SetMediaTrackInfo_Value(v.track, "I_RECMODE", 0)  -- record input
+
+  reaper.SetEditCurPos((reaper.GetProjectLength(0) or 0) + 1.0, false, false)
+  reaper.Main_OnCommand(1013, 0) -- Transport: Record
+
+  state.voice = v
+  state.recording = true
+  state.status = "Recording… speak, then Stop & post."
+end
+
+local function stop_and_post_voice()
+  if not state.recording or not state.voice then return end
+  local v = state.voice
+
+  reaper.Main_OnCommand(1016, 0) -- Transport: Stop (finalizes the recorded file)
+  state.recording = false
+
+  local file
+  if v.track and reaper.GetTrackNumMediaItems(v.track) > 0 then
+    local item = reaper.GetTrackMediaItem(v.track, 0)
+    local take = item and reaper.GetActiveTake(item)
+    if take then
+      local src = reaper.GetMediaItemTake_Source(take)
+      if src then file = reaper.GetMediaSourceFileName(src, "") end
+    end
+  end
+
+  -- Tear down + restore BEFORE the upload so the session is clean either way.
+  if v.track then reaper.DeleteTrack(v.track) end
+  for i = 0, (v.count or 1) - 1 do
+    local t = reaper.GetTrack(0, i)
+    if t then reaper.SetMediaTrackInfo_Value(t, "I_RECARM", v.saved_arm[i] or 0) end
+  end
+  reaper.SetEditCurPos(v.cursor or 0, false, false)
+  reaper.UpdateArrange()
+  state.voice = nil
+
+  if not file or file == "" then
+    state.status = "No recording found. Check your audio input device."
+    return
+  end
+  if file_size(file) < 1000 then
+    os.remove(file)
+    state.status = "Nothing recorded (silent). Check your mic input."
+    return
+  end
+
+  local ext = (file:match("%.([^.]+)$") or "wav"):lower()
+  state.status = "Uploading voice memo…"
+  post_voice_memo(file, ext, v.timestamp_ms)
+  os.remove(file)
+end
+
 local function import_stem(stem)
   state.status = "Pulling " .. stem.name .. "…"
   local http, body = http_get_json("/api/reaper/stems/" .. stem.id .. "/original")
@@ -565,6 +677,12 @@ local function draw_project()
   changed, state.comment_body = reaper.ImGui_InputText(ctx, "New comment", state.comment_body)
   changed, state.comment_at_cursor = reaper.ImGui_Checkbox(ctx, "At edit cursor", state.comment_at_cursor)
   if reaper.ImGui_Button(ctx, "Post comment") then post_comment() end
+  reaper.ImGui_SameLine(ctx)
+  if state.recording then
+    if reaper.ImGui_Button(ctx, "Stop & post voice memo") then stop_and_post_voice() end
+  else
+    if reaper.ImGui_Button(ctx, "Record voice memo") then start_voice_record() end
+  end
 end
 
 local function loop()
