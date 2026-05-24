@@ -1,13 +1,15 @@
 -- @description Take for Reaper
--- @version 0.2.1
+-- @version 0.3.0
 -- @author Dead Pixel Design
 -- @about
 --   A docked panel that connects this Reaper session to your Take projects.
 --   Paste an API token (create one at take-ebon.vercel.app -> Reaper access), browse the
 --   projects you collaborate on, pull stems onto tracks at their timecode, and
 --   push back: render the selected track as a new stem, or render the master as
---   a new rough. Reaper is the only client that touches original WAVs, and it's
---   paid-only — the owner of the project must be on a paid plan.
+--   a new rough. Read the project's comments and drop your own from the panel —
+--   pinned to the edit cursor on the current rough. Reaper is the only client
+--   that touches original WAVs, and it's paid-only — the owner of the project
+--   must be on a paid plan.
 --
 --   Pushes use this project's REAPER render format. Set it to WAV, AIFF, FLAC,
 --   or MP3 in the Render dialog (File > Render) once; Take reuses it.
@@ -27,6 +29,9 @@ local state = {
   projects = {},
   project = nil, -- { id, name }
   stems = {},
+  comments = {},
+  comment_body = "",
+  comment_at_cursor = true,
   push_name = "",
   status = "",
   show_settings = false,
@@ -348,6 +353,20 @@ local function load_projects()
     or (#state.projects .. " project(s).")
 end
 
+local function fmt_ts(ms)
+  if not ms then return "" end
+  local total = math.floor(ms / 1000)
+  return string.format("%d:%02d", math.floor(total / 60), total % 60)
+end
+
+local function load_comments()
+  if not state.project then return end
+  local http, body = http_get_json("/api/reaper/projects/" .. state.project.id .. "/comments")
+  if http ~= 200 then state.comments = {}; return end
+  local data = json_decode(body)
+  state.comments = (data and data.comments) or {}
+end
+
 local function open_project(p)
   state.status = "Loading " .. p.name .. "…"
   local http, body = http_get_json("/api/reaper/projects/" .. p.id)
@@ -356,7 +375,28 @@ local function open_project(p)
   state.project = data and data.project or p
   state.stems = (data and data.stems) or {}
   state.view = "project"
-  state.status = #state.stems .. " stem(s)."
+  load_comments()
+  state.status = #state.stems .. " stem(s), " .. #state.comments .. " comment(s)."
+end
+
+local function post_comment()
+  if not state.project then state.status = "Open a project first."; return end
+  if state.comment_body == "" or state.comment_body:match("^%s*$") then
+    state.status = "Type a comment first."; return
+  end
+  local payload = { body = state.comment_body }
+  -- At the edit cursor -> a timestamp on the current rough (server resolves it).
+  if state.comment_at_cursor then
+    payload.timestampMs = math.floor((reaper.GetCursorPosition() or 0) * 1000)
+  end
+  state.status = "Posting comment…"
+  local http = select(1, http_post_json("/api/reaper/projects/" .. state.project.id .. "/comments", payload))
+  if http == 401 then state.status = "Token rejected. Check it in Settings."; return end
+  if http == 403 then state.status = "This project's owner isn't on a paid plan."; return end
+  if http ~= 200 then state.status = "Couldn't post comment (" .. http .. ")."; return end
+  state.comment_body = ""
+  load_comments()
+  state.status = "Comment posted."
 end
 
 local function import_stem(stem)
@@ -507,6 +547,24 @@ local function draw_project()
   local changed
   changed, state.push_name = reaper.ImGui_InputText(ctx, "Name (optional)", state.push_name)
   if reaper.ImGui_Button(ctx, "Push stem") then push_stem() end
+
+  reaper.ImGui_Separator(ctx)
+  reaper.ImGui_Text(ctx, "Comments")
+  reaper.ImGui_SameLine(ctx)
+  if reaper.ImGui_Button(ctx, "Refresh##comments") then load_comments() end
+  if #state.comments == 0 then
+    reaper.ImGui_TextWrapped(ctx, "No comments yet.")
+  else
+    for _, c in ipairs(state.comments) do
+      local who = c.author_name or "?"
+      local at = c.timestamp_ms and (" @" .. fmt_ts(c.timestamp_ms)) or ""
+      local text = c.is_voice and "[voice memo]" or (c.body or "")
+      reaper.ImGui_TextWrapped(ctx, who .. at .. ": " .. text)
+    end
+  end
+  changed, state.comment_body = reaper.ImGui_InputText(ctx, "New comment", state.comment_body)
+  changed, state.comment_at_cursor = reaper.ImGui_Checkbox(ctx, "At edit cursor", state.comment_at_cursor)
+  if reaper.ImGui_Button(ctx, "Post comment") then post_comment() end
 end
 
 local function loop()

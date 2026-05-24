@@ -36,3 +36,7 @@ In a project, click **Import** next to a stem. Take downloads the original and d
 - **Render & push as rough** — renders the master mix and uploads it as a new rough, which becomes the project's current rough.
 
 Pushes reuse this project's REAPER render format (File → Render → WAV/AIFF/FLAC/MP3; WAV is the default). The web app generates the compressed playback copy after upload, so a pushed file shows as "processing" for a moment before it plays on the web.
+
+## Comments
+
+Open a project to read its discussion in the panel. Type a comment and click **Post**. Leave **At edit cursor** checked and it pins to that timecode on the current rough, so it lands at the same spot for everyone on the web. Uncheck it to post a comment on the project as a whole.
