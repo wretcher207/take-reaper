@@ -1,5 +1,5 @@
 -- @description Take for Reaper
--- @version 0.4.0
+-- @version 0.5.0
 -- @author Dead Pixel Design
 -- @about
 --   A docked panel that connects this Reaper session to your Take projects.
@@ -206,6 +206,19 @@ end
 
 local function q(s) return '"' .. tostring(s):gsub('"', '') .. '"' end
 
+local function open_file(path)
+  local os_name = reaper.GetOS() or ""
+  local cmd
+  if os_name:find("Win") then
+    cmd = "cmd /c start \"\" " .. q(path)
+  elseif os_name:find("OSX") then
+    cmd = "open " .. q(path)
+  else
+    cmd = "xdg-open " .. q(path)
+  end
+  reaper.ExecProcess(cmd, 1000)
+end
+
 local function read_file(path)
   local f = io.open(path, "rb")
   if not f then return nil end
@@ -370,6 +383,38 @@ local function fmt_ts(ms)
   return string.format("%d:%02d", math.floor(total / 60), total % 60)
 end
 
+local function comment_key(c)
+  return tostring((c and c.id) or (c and c.created_at) or "comment")
+end
+
+local function comment_lane(c)
+  local pinned = c and c.pinned_to or "project"
+  if pinned == "rough_ts" then return "ROUGH" end
+  if pinned == "stem_ts" then return "STEM" end
+  if pinned == "stem" then return "STEM" end
+  return "PROJECT"
+end
+
+local function comment_text(c)
+  if c and c.is_voice then return "[voice memo]" end
+  return (c and c.body) or ""
+end
+
+local function short_text(s, max_len)
+  s = tostring(s or ""):gsub("%s+", " ")
+  max_len = max_len or 54
+  if #s <= max_len then return s end
+  return s:sub(1, max_len - 3) .. "..."
+end
+
+local function comment_marker_name(c)
+  local who = (c and c.author_name) or "Take"
+  local at = (c and c.timestamp_ms) and (" @" .. fmt_ts(c.timestamp_ms)) or ""
+  local text = comment_text(c)
+  if text == "" then text = "comment" end
+  return "Take: " .. who .. at .. " - " .. short_text(text, 80)
+end
+
 local function load_comments()
   if not state.project then return end
   local http, body = http_get_json("/api/reaper/projects/" .. state.project.id .. "/comments")
@@ -410,6 +455,58 @@ local function post_comment()
   state.status = "Comment posted."
 end
 
+local function jump_to_comment(c)
+  local ms = c and tonumber(c.timestamp_ms)
+  if not ms then
+    state.status = "That comment is a project note, not a timeline pin."
+    return
+  end
+  reaper.SetEditCurPos(ms / 1000, true, false)
+  state.status = "Cursor at " .. fmt_ts(ms) .. "."
+end
+
+local function add_comment_marker(c)
+  local ms = c and tonumber(c.timestamp_ms)
+  if not ms then
+    state.status = "Only timeline comments can become markers."
+    return false
+  end
+  local color = 0
+  if reaper.ColorToNative then color = reaper.ColorToNative(237, 111, 92) + 0x1000000 end
+  reaper.AddProjectMarker2(0, false, ms / 1000, 0, comment_marker_name(c), -1, color)
+  reaper.UpdateArrange()
+  state.status = "Added marker at " .. fmt_ts(ms) .. "."
+  return true
+end
+
+local function clear_take_markers()
+  local _, marker_count, region_count = reaper.CountProjectMarkers(0)
+  local total = (marker_count or 0) + (region_count or 0)
+  local removed = 0
+  for i = total - 1, 0, -1 do
+    local _, is_region, _, _, name, index = reaper.EnumProjectMarkers3(0, i)
+    if not is_region and name and name:sub(1, 6) == "Take: " then
+      reaper.DeleteProjectMarker(0, index, false)
+      removed = removed + 1
+    end
+  end
+  reaper.UpdateArrange()
+  return removed
+end
+
+local function sync_comment_markers()
+  clear_take_markers()
+  local added = 0
+  for _, c in ipairs(state.comments) do
+    if c.timestamp_ms then
+      if add_comment_marker(c) then added = added + 1 end
+    end
+  end
+  state.status = added == 0
+    and "No timeline comments to mark."
+    or ("Dropped " .. added .. " Take marker(s).")
+end
+
 -- Voice memos (spec §2.5, paid §2.11). request signed URL -> PUT the WAV ->
 -- finalize as a voice comment. ext/content-type come from the recorded file +
 -- the request response; the voice-memos bucket accepts wav.
@@ -437,6 +534,27 @@ local function post_voice_memo(file, ext, timestamp_ms)
   load_comments()
   state.status = "Voice memo posted."
   return true
+end
+
+local function open_voice_memo(c)
+  if not state.project then state.status = "Open a project first."; return end
+  if not c or not c.is_voice then state.status = "That comment has no voice memo."; return end
+  if not c.id then state.status = "Voice memo is missing a comment id."; return end
+
+  state.status = "Opening voice memo..."
+  local http, body = http_get_json("/api/reaper/projects/" .. state.project.id .. "/voice/" .. c.id)
+  if http == 401 then state.status = "Token rejected. Check it in Settings."; return end
+  if http == 403 then state.status = "This project's owner isn't on a paid plan."; return end
+  if http ~= 200 then state.status = "Couldn't open voice memo (" .. http .. ")."; return end
+  local data = json_decode(body)
+  if not data or not data.url then state.status = "No voice memo URL returned."; return end
+
+  local filename = tostring(data.filename or ("voice_" .. comment_key(c) .. ".wav")):gsub("[/\\]", "_")
+  local dest = tmp_path("voice_" .. filename)
+  local dl = http_download(data.url, dest)
+  if dl ~= 200 then state.status = "Voice memo download failed (" .. dl .. ")."; return end
+  open_file(dest)
+  state.status = "Opened voice memo."
 end
 
 -- Record from the default audio input onto a throwaway track placed past the end
@@ -725,6 +843,34 @@ local function primary_button(label, width)
   return clicked
 end
 
+local function draw_comment_item(c)
+  local key = comment_key(c)
+  local lane = comment_lane(c)
+  local who = (c and c.author_name) or "?"
+  local ms = c and tonumber(c.timestamp_ms)
+  local at = ms and (" @" .. fmt_ts(ms)) or ""
+
+  reaper.ImGui_TextColored(ctx, COLORS.coral, lane)
+  reaper.ImGui_SameLine(ctx)
+  reaper.ImGui_TextColored(ctx, COLORS.ink, who .. at)
+  reaper.ImGui_TextWrapped(ctx, comment_text(c))
+
+  if ms then
+    if reaper.ImGui_Button(ctx, "Jump##jump_" .. key) then jump_to_comment(c) end
+    reaper.ImGui_SameLine(ctx)
+    if reaper.ImGui_Button(ctx, "Marker##marker_" .. key) then add_comment_marker(c) end
+    if c.is_voice then
+      reaper.ImGui_SameLine(ctx)
+      if reaper.ImGui_Button(ctx, "Voice##voice_" .. key) then open_voice_memo(c) end
+    end
+  elseif c.is_voice then
+    if reaper.ImGui_Button(ctx, "Voice##voice_" .. key) then open_voice_memo(c) end
+  else
+    muted_text("Project note")
+  end
+  reaper.ImGui_Separator(ctx)
+end
+
 local function draw_status()
   if state.status == "" then return end
   local color = COLORS.muted
@@ -802,25 +948,29 @@ local function draw_project()
   changed, state.push_name = reaper.ImGui_InputText(ctx, "Name (optional)", state.push_name)
   if primary_button("Push selected track", content_width()) then push_stem() end
 
-  section_title("Comments", #state.comments > 0 and (#state.comments .. " on current rough") or "")
+  section_title("Comments", #state.comments > 0 and (#state.comments .. " in this project") or "")
   if reaper.ImGui_Button(ctx, "Refresh comments") then load_comments() end
+  if #state.comments > 0 then
+    if reaper.ImGui_Button(ctx, "Drop timeline markers") then sync_comment_markers() end
+    reaper.ImGui_SameLine(ctx)
+    if reaper.ImGui_Button(ctx, "Clear Take markers") then
+      local removed = clear_take_markers()
+      state.status = removed == 0 and "No Take markers to clear." or ("Cleared " .. removed .. " Take marker(s).")
+    end
+  end
   if #state.comments == 0 then
     empty_state("No comments yet.")
   else
     reaper.ImGui_BeginChild(ctx, "comment_list", 0, 150, true)
     for _, c in ipairs(state.comments) do
-      local who = c.author_name or "?"
-      local at = c.timestamp_ms and (" @" .. fmt_ts(c.timestamp_ms)) or ""
-      local text = c.is_voice and "[voice memo]" or (c.body or "")
-      reaper.ImGui_TextColored(ctx, COLORS.coral, who .. at)
-      reaper.ImGui_TextWrapped(ctx, text)
-      reaper.ImGui_Separator(ctx)
+      draw_comment_item(c)
     end
     reaper.ImGui_EndChild(ctx)
   end
   reaper.ImGui_SetNextItemWidth(ctx, content_width())
   changed, state.comment_body = reaper.ImGui_InputText(ctx, "New comment", state.comment_body)
-  changed, state.comment_at_cursor = reaper.ImGui_Checkbox(ctx, "At edit cursor", state.comment_at_cursor)
+  local cursor_label = "At edit cursor @" .. fmt_ts(math.floor((reaper.GetCursorPosition() or 0) * 1000))
+  changed, state.comment_at_cursor = reaper.ImGui_Checkbox(ctx, cursor_label, state.comment_at_cursor)
   if primary_button("Post comment") then post_comment() end
   reaper.ImGui_SameLine(ctx)
   if state.recording then

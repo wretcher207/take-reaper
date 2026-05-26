@@ -52,11 +52,15 @@ The web app generates the compressed playback copy after upload. A pushed file s
 
 The **Comments** section lists the discussion on the current rough.
 
+Timeline comments have **Jump** and **Marker** actions. Jump moves Reaper's edit cursor to the comment time. Marker drops a Reaper project marker named `Take: ...` at that timestamp. **Drop timeline markers** adds markers for every timestamped Take comment, and **Clear Take markers** removes only markers with the `Take:` prefix.
+
 Type into **New comment** and press **Post comment**. With **At edit cursor** checked, it pins to that timecode on the rough. Unchecked, it's a project-level note.
 
 **Record voice memo** arms a throwaway track placed past the end of your project. Nothing on your timeline is touched. Your other tracks' record-arm state is saved and restored when you stop.
 
 **Stop and post voice memo** uploads the recording as a voice comment. The edit cursor position at record time becomes the comment's timecode.
+
+For posted voice memo comments, **Voice** downloads the memo through a short-lived Take URL and opens it with your system audio player.
 
 Make sure your mic is on Reaper's first audio input.
 
@@ -65,7 +69,7 @@ Make sure your mic is on Reaper's first audio input.
 Requires the **ReaImGui** extension. Install it via ReaPack from the default ReaTeam repository if you don't have it.
 
 1. Reaper > Extensions > ReaPack > Import repositories
-2. Paste this URL: `https://raw.githubusercontent.com/deadpxl/take-reaper/main/index.xml`
+2. Paste this URL: `https://raw.githubusercontent.com/wretcher207/take-reaper/main/index.xml`
 3. Install **Take.lua** from the "Take" category
 4. Bind it to a keyboard shortcut or find it in the Actions list
 
