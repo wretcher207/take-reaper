@@ -1,41 +1,78 @@
 # Take for Reaper
 
-The Reaper-side of Take. A docked ImGui panel that browses your Take projects and moves audio both ways without leaving the DAW.
+The stem-and-rough sharing layer that lives inside your DAW.
 
-Status: **push, pull, comment, and voice memo live** (v0.4.0). Token auth → project list → project detail → pull a stem onto a track at its timecode, push back (render the selected track as a new stem, or the master as a new rough), and read/drop comments — text or a recorded voice memo, posted "at edit cursor" pins to that timecode on the current rough.
+Tagline: *What's your take?*
+
+## The problem
+
+You send stems via Dropbox. Your collaborator listens to the wrong version. You're now talking about two different songs.
+
+You get feedback in Slack, in email, in a voice memo app. It lives nowhere near the audio it refers to.
+
+You bounce a rough, upload it, wait for reactions, and find out three days later the kick drum at 1:42 was rushing.
+
+You've solved this with discipline and naming conventions and folder structures that fall apart the moment someone opens the wrong file.
+
+## What Take does
+
+Take gives your song-in-progress a home. The project is the container. Stems and roughs stack underneath. Comments pin to specific timestamps on the audio. Your collaborator sees them right where you left them.
+
+From inside Reaper you can:
+
+- Browse your Take projects without leaving your session
+- Pull stems from a project onto your timeline at their correct timecode
+- Push a track as a new stem
+- Push your master as a new rough
+- Read comments and drop text or voice memos, pinned to the edit cursor
+
+The Reaper panel talks to the Take web app over HTTPS. Your collaborator doesn't need to be in Reaper. They see everything in the browser.
 
 ## Connect
 
-1. At [take-ebon.vercel.app](https://take-ebon.vercel.app) → **Reaper access**, create an API token (copy it once).
-2. In the Take panel, open **Settings**, paste the token (and the server URL if you're not on take-ebon.vercel.app), then **Done**.
-3. Your paid projects appear. Click one to see its stems.
-
-Reaper only sees projects whose owner is on a paid plan — that's the upgrade lever. It's also the only client that downloads original WAVs; the web app streams compressed copies.
+1. Go to [take-ebon.vercel.app](https://take-ebon.vercel.app), click **Reaper access**, create an API token. Copy it once.
+2. In the Take panel inside Reaper, open **Settings**, paste your token, then **Done**.
+3. Your paid projects appear. Click one to see its stems and roughs.
 
 ## Pull
 
-In a project, click **Import** next to a stem. Take downloads the original and drops it on a new track at its stored timecode.
+Click **Import** next to any stem. Take downloads the original WAV and drops it on a new track at its stored timecode. Nothing leaves your DAW.
 
 ## Push
 
-- **Push selected track as stem** — select a track, optionally type a name, click **Push stem**. Take renders that track and uploads it as a new stem on the project.
-- **Render & push as rough** — click the button at the top of a project. Take renders the master mix and uploads it as a new rough, which becomes the project's current rough.
+Select a track, optionally type a name, click **Push stem**. Take renders that track and uploads it as a new stem on the project.
 
-Pushes reuse **this project's REAPER render format**. Set it once in **File → Render** to WAV, AIFF, FLAC, or MP3 (WAV is REAPER's default). If your render format is something else, Take will say so. The web app generates the compressed playback copy after upload, so a pushed file shows as "processing" for a moment before it plays on the web.
+Click **Render and push as rough** at the top of a project. Take renders your master mix and uploads it as the current rough.
 
-## Comment & voice memo
+These reuse your project's render format. Set it once in **File > Render**. WAV, AIFF, FLAC, or MP3. WAV is the default.
 
-In a project, the **Comments** section lists the discussion. Type into **New comment** and **Post comment** — with **At edit cursor** checked, it pins to that timecode on the current rough; unchecked, it's a project-level note.
+The web app generates the compressed playback copy after upload. A pushed file shows as "processing" for a moment before it plays.
 
-**Record voice memo** records from your default audio input onto a throwaway track placed past the end of the project (nothing on your timeline is touched), then **Stop & post voice memo** uploads it as a voice comment. Record-arm on your tracks is saved and restored, and the edit cursor at record-time becomes the comment timecode (when **At edit cursor** is checked). Make sure your mic is on REAPER's first audio input.
+## Comment and voice memo
 
-Needs `curl` (built into Windows 10+, macOS, and Linux) and the **ReaImGui** extension.
+The **Comments** section lists the discussion on the current rough.
 
-## Install (for dev)
+Type into **New comment** and press **Post comment**. With **At edit cursor** checked, it pins to that timecode on the rough. Unchecked, it's a project-level note.
 
-1. Reaper → Extensions → ReaPack → Import repositories
-2. Paste the raw URL of this directory's `index.xml`
-3. Install **Take.lua** under the "Take" category
-4. Bind it to a keyboard shortcut or run it from the Actions list
+**Record voice memo** arms a throwaway track placed past the end of your project. Nothing on your timeline is touched. Your other tracks' record-arm state is saved and restored when you stop.
 
-Requires the **ReaImGui** extension (install via ReaPack from the default ReaTeam repo if you don't already have it).
+**Stop and post voice memo** uploads the recording as a voice comment. The edit cursor position at record time becomes the comment's timecode.
+
+Make sure your mic is on Reaper's first audio input.
+
+## Install
+
+Requires the **ReaImGui** extension. Install it via ReaPack from the default ReaTeam repository if you don't have it.
+
+1. Reaper > Extensions > ReaPack > Import repositories
+2. Paste this URL: `https://raw.githubusercontent.com/deadpxl/take-reaper/main/index.xml`
+3. Install **Take.lua** from the "Take" category
+4. Bind it to a keyboard shortcut or find it in the Actions list
+
+## Pricing
+
+Free: web app, text comments, stem and rough uploads, 5GB storage.
+
+$12/month: Reaper integration, voice memos, cut and loop proposals, 100GB storage, 12-month history, public wrap pages.
+
+Project owner pays. Collaborators ride along.

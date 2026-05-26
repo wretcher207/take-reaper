@@ -222,6 +222,10 @@ local function file_size(path)
   return size
 end
 
+local function safe_remove(path)
+  if path and path ~= "" then pcall(os.remove, path) end
+end
+
 -- Pull the http status (last line) out of ExecProcess's "<exitcode>\n<stdout>".
 local function status_from(out)
   out = out or ""
@@ -338,6 +342,11 @@ local function render_to_temp(render_settings, pattern)
   return nil
 end
 
+local function cleanup_render(path)
+  if not path then return end
+  safe_remove(path)
+end
+
 -- --------------------------------------------------------------------------
 -- Actions
 -- --------------------------------------------------------------------------
@@ -408,25 +417,26 @@ local function post_voice_memo(file, ext, timestamp_ms)
   local pid = state.project.id
   local req_http, req_body = http_post_json(
     "/api/reaper/projects/" .. pid .. "/voice/request", { ext = ext })
-  if req_http == 401 then state.status = "Token rejected. Check it in Settings."; return end
-  if req_http == 403 then state.status = "This project's owner isn't on a paid plan."; return end
-  if req_http == 400 then state.status = "Recording format not accepted (" .. ext .. ")."; return end
-  if req_http ~= 200 then state.status = "Voice request failed (" .. req_http .. ")."; return end
+  if req_http == 401 then state.status = "Token rejected. Check it in Settings."; return false end
+  if req_http == 403 then state.status = "This project's owner isn't on a paid plan."; return false end
+  if req_http == 400 then state.status = "Recording format not accepted (" .. ext .. ")."; return false end
+  if req_http ~= 200 then state.status = "Voice request failed (" .. req_http .. ")."; return false end
   local req = json_decode(req_body)
-  if not req or not req.signedUrl then state.status = "No upload URL returned."; return end
+  if not req or not req.signedUrl then state.status = "No upload URL returned."; return false end
 
   local up = http_upload(req.signedUrl, file, req.contentType or MIME[ext] or "audio/wav")
-  if up ~= 200 then state.status = "Upload failed (" .. up .. ")."; return end
+  if up ~= 200 then state.status = "Upload failed (" .. up .. "). Voice memo kept at: " .. file; return false end
 
   local payload = { path = req.path }
   if timestamp_ms then payload.timestampMs = timestamp_ms end
   local fin_http = select(1, http_post_json(
     "/api/reaper/projects/" .. pid .. "/voice/finalize", payload))
-  if fin_http == 403 then state.status = "This project's owner isn't on a paid plan."; return end
-  if fin_http ~= 200 then state.status = "Finalize failed (" .. fin_http .. ")."; return end
+  if fin_http == 403 then state.status = "This project's owner isn't on a paid plan."; return false end
+  if fin_http ~= 200 then state.status = "Finalize failed (" .. fin_http .. "). Voice memo kept at: " .. file; return false end
 
   load_comments()
   state.status = "Voice memo posted."
+  return true
 end
 
 -- Record from the default audio input onto a throwaway track placed past the end
@@ -500,15 +510,16 @@ local function stop_and_post_voice()
     return
   end
   if file_size(file) < 1000 then
-    os.remove(file)
+    safe_remove(file)
     state.status = "Nothing recorded (silent). Check your mic input."
     return
   end
 
   local ext = (file:match("%.([^.]+)$") or "wav"):lower()
   state.status = "Uploading voice memo…"
-  post_voice_memo(file, ext, v.timestamp_ms)
-  os.remove(file)
+  if post_voice_memo(file, ext, v.timestamp_ms) then
+    safe_remove(file)
+  end
 end
 
 local function import_stem(stem)
@@ -542,11 +553,17 @@ local function do_push(kind, render_settings, pattern, name, extra, on_done)
   if not state.project then state.status = "Open a project first."; return end
   if state.token == "" then state.status = "Add a token in Settings first."; return end
 
+  local function fail_after_render(file, message)
+    cleanup_render(file)
+    state.status = message
+    return false
+  end
+
   state.status = "Rendering…"
   local file, ext = render_to_temp(render_settings, pattern)
   if not file then
     state.status = "No render produced. Set REAPER's render format to WAV, AIFF, FLAC, or MP3."
-    return
+    return false
   end
 
   state.status = "Uploading " .. name .. "…"
@@ -556,25 +573,26 @@ local function do_push(kind, render_settings, pattern, name, extra, on_done)
     sizeBytes = file_size(file),
     mimeType = MIME[ext],
   })
-  if req_http == 401 then state.status = "Token rejected. Check it in Settings."; return end
-  if req_http == 403 then state.status = "This project's owner isn't on a paid plan."; return end
-  if req_http ~= 200 then state.status = "Push request failed (" .. req_http .. ")."; return end
+  if req_http == 401 then return fail_after_render(file, "Token rejected. Check it in Settings.") end
+  if req_http == 403 then return fail_after_render(file, "This project's owner isn't on a paid plan.") end
+  if req_http ~= 200 then return fail_after_render(file, "Push request failed (" .. req_http .. ").") end
   local req = json_decode(req_body)
-  if not req or not req.signedUrl then state.status = "No upload URL returned."; return end
+  if not req or not req.signedUrl then return fail_after_render(file, "No upload URL returned.") end
 
   local up = http_upload(req.signedUrl, file, MIME[ext])
-  if up ~= 200 then state.status = "Upload failed (" .. up .. ")."; return end
+  if up ~= 200 then return fail_after_render(file, "Upload failed (" .. up .. ").") end
 
   local body = { projectId = state.project.id, path = req.path }
   body[kind == "stem" and "stemId" or "roughId"] = (kind == "stem") and req.stemId or req.roughId
   for k, v in pairs(extra or {}) do body[k] = v end
 
   local fin_http = select(1, http_post_json("/api/reaper/push/" .. kind .. "/finalize", body))
-  if fin_http == 403 then state.status = "This project's owner isn't on a paid plan."; return end
-  if fin_http ~= 200 then state.status = "Finalize failed (" .. fin_http .. ")."; return end
+  if fin_http == 403 then return fail_after_render(file, "This project's owner isn't on a paid plan.") end
+  if fin_http ~= 200 then return fail_after_render(file, "Finalize failed (" .. fin_http .. ").") end
 
-  os.remove(file)
+  cleanup_render(file)
   if on_done then on_done() end
+  return true
 end
 
 local function push_stem()
@@ -596,15 +614,24 @@ local function push_stem()
     reaper.SetMediaTrackInfo_Value(t, "I_SOLO", (t == track) and 1 or 0)
   end
 
-  do_push("stem", 0, "take_stem", name, { name = name, timecodeOffsetMs = 0 }, function()
-    state.status = "Pushed stem: " .. name .. "."
-    open_project(state.project) -- refresh the stem list
+  local pushed = false
+  local ok, err = pcall(function()
+    pushed = do_push("stem", 0, "take_stem", name, { name = name, timecodeOffsetMs = 0 })
   end)
 
   for i = 0, count - 1 do
     reaper.SetMediaTrackInfo_Value(reaper.GetTrack(0, i), "I_SOLO", saved_solo[i] or 0)
   end
   reaper.UpdateArrange()
+
+  if not ok then
+    state.status = "Push failed: " .. tostring(err)
+    return
+  end
+  if pushed then
+    open_project(state.project) -- refresh the stem list
+    state.status = "Pushed stem: " .. name .. "."
+  end
 end
 
 local function push_rough()
@@ -622,76 +649,197 @@ end
 -- --------------------------------------------------------------------------
 -- UI
 -- --------------------------------------------------------------------------
+local COLORS = {
+  paper = 0xEFE7D2FF,
+  paper_warm = 0xECE4CFFF,
+  bone = 0xF7F1DEFF,
+  ink = 0x15140FFF,
+  muted = 0x5A5448FF,
+  faint = 0x8B8676FF,
+  coral = 0xED6F5CFF,
+  coral_soft = 0xF08E7CFF,
+  line = 0x15140F29,
+  danger = 0xB33A2EFF,
+  success = 0x4F6F38FF,
+}
+
+local function push_theme()
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_WindowPadding(), 14, 12)
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_FramePadding(), 8, 5)
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_ItemSpacing(), 8, 7)
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_FrameRounding(), 4)
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_ChildRounding(), 5)
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_WindowRounding(), 6)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), COLORS.ink)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_WindowBg(), COLORS.paper)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ChildBg(), COLORS.bone)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Border(), COLORS.line)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_FrameBg(), COLORS.bone)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_FrameBgHovered(), COLORS.paper_warm)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_FrameBgActive(), 0xDDD2B6FF)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Button(), COLORS.bone)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonHovered(), COLORS.paper_warm)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonActive(), 0xDDD2B6FF)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Header(), COLORS.bone)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_HeaderHovered(), COLORS.paper_warm)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_HeaderActive(), 0xDDD2B6FF)
+end
+
+local function pop_theme()
+  reaper.ImGui_PopStyleColor(ctx, 13)
+  reaper.ImGui_PopStyleVar(ctx, 6)
+end
+
+local function content_width()
+  local w = reaper.ImGui_GetContentRegionAvail(ctx)
+  return math.max(120, w or 120)
+end
+
+local function section_title(label, detail)
+  reaper.ImGui_Spacing(ctx)
+  reaper.ImGui_TextColored(ctx, COLORS.ink, label)
+  if detail and detail ~= "" then
+    reaper.ImGui_SameLine(ctx)
+    reaper.ImGui_TextColored(ctx, COLORS.faint, detail)
+  end
+  reaper.ImGui_Separator(ctx)
+end
+
+local function muted_text(text)
+  reaper.ImGui_TextColored(ctx, COLORS.muted, text)
+end
+
+local function empty_state(text)
+  reaper.ImGui_BeginChild(ctx, "empty_" .. text, 0, 48, true)
+  muted_text(text)
+  reaper.ImGui_EndChild(ctx)
+end
+
+local function primary_button(label, width)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Button(), COLORS.coral)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonHovered(), COLORS.coral_soft)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonActive(), COLORS.coral)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), COLORS.bone)
+  local clicked = reaper.ImGui_Button(ctx, label, width or 0, 0)
+  reaper.ImGui_PopStyleColor(ctx, 4)
+  return clicked
+end
+
+local function draw_status()
+  if state.status == "" then return end
+  local color = COLORS.muted
+  local lowered = state.status:lower()
+  if lowered:find("failed") or lowered:find("couldn't") or lowered:find("rejected")
+      or lowered:find("check") or lowered:find("no ") then
+    color = COLORS.danger
+  elseif lowered:find("posted") or lowered:find("pushed") or lowered:find("imported") then
+    color = COLORS.success
+  end
+
+  reaper.ImGui_Spacing(ctx)
+  reaper.ImGui_BeginChild(ctx, "status", 0, 44, true)
+  reaper.ImGui_TextColored(ctx, color, state.status)
+  reaper.ImGui_EndChild(ctx)
+end
+
 local function draw_settings()
+  section_title("Connection", "Take account")
   local changed
+  muted_text("Server")
+  reaper.ImGui_SetNextItemWidth(ctx, content_width())
   changed, state.base_url = reaper.ImGui_InputText(ctx, "Server URL", state.base_url)
   if changed then reaper.SetExtState(EXT, "base_url", state.base_url, true) end
+  muted_text("API token")
+  reaper.ImGui_SetNextItemWidth(ctx, content_width())
   changed, state.token = reaper.ImGui_InputText(ctx, "API token", state.token,
     reaper.ImGui_InputTextFlags_Password())
   if changed then reaper.SetExtState(EXT, "token", state.token, true) end
-  if reaper.ImGui_Button(ctx, "Done") then state.show_settings = false; load_projects() end
+  if primary_button("Done", content_width()) then state.show_settings = false; load_projects() end
 end
 
 local function draw_projects()
-  if reaper.ImGui_Button(ctx, "Refresh") then load_projects() end
-  reaper.ImGui_Separator(ctx)
-  for _, p in ipairs(state.projects) do
-    if reaper.ImGui_Selectable(ctx, p.name .. "##" .. p.id) then open_project(p) end
+  section_title("Projects", #state.projects > 0 and (#state.projects .. " available") or "")
+  if primary_button("Refresh projects", content_width()) then load_projects() end
+  if state.token == "" then
+    empty_state("Add your token in Settings to load paid projects.")
+    return
   end
+  if #state.projects == 0 then
+    empty_state("No projects loaded yet.")
+    return
+  end
+
+  reaper.ImGui_BeginChild(ctx, "project_list", 0, 220, true)
+  for i, p in ipairs(state.projects) do
+    local label = tostring(i) .. ". " .. p.name .. "##" .. p.id
+    if reaper.ImGui_Selectable(ctx, label) then open_project(p) end
+  end
+  reaper.ImGui_EndChild(ctx)
 end
 
 local function draw_project()
   if reaper.ImGui_Button(ctx, "< Projects") then state.view = "projects" end
   reaper.ImGui_SameLine(ctx)
-  reaper.ImGui_Text(ctx, state.project and state.project.name or "")
-  reaper.ImGui_SameLine(ctx)
-  if reaper.ImGui_Button(ctx, "Render & push as rough") then push_rough() end
-  reaper.ImGui_Separator(ctx)
+  reaper.ImGui_TextColored(ctx, COLORS.ink, state.project and state.project.name or "")
+  if primary_button("Render and push rough", content_width()) then push_rough() end
 
-  for _, s in ipairs(state.stems) do
-    reaper.ImGui_Text(ctx, s.name)
-    reaper.ImGui_SameLine(ctx)
-    if reaper.ImGui_Button(ctx, "Import##" .. s.id) then import_stem(s) end
+  section_title("Stems", #state.stems > 0 and (#state.stems .. " in this project") or "")
+  if #state.stems == 0 then
+    empty_state("No stems in this project yet.")
+  else
+    reaper.ImGui_BeginChild(ctx, "stem_list", 0, 128, true)
+    for _, s in ipairs(state.stems) do
+      reaper.ImGui_TextWrapped(ctx, s.name)
+      reaper.ImGui_SameLine(ctx)
+      if reaper.ImGui_Button(ctx, "Import##" .. s.id) then import_stem(s) end
+    end
+    reaper.ImGui_EndChild(ctx)
   end
 
-  reaper.ImGui_Separator(ctx)
-  reaper.ImGui_Text(ctx, "Push selected track as stem")
+  section_title("Push stem", "selected track")
   local changed
+  reaper.ImGui_SetNextItemWidth(ctx, content_width())
   changed, state.push_name = reaper.ImGui_InputText(ctx, "Name (optional)", state.push_name)
-  if reaper.ImGui_Button(ctx, "Push stem") then push_stem() end
+  if primary_button("Push selected track", content_width()) then push_stem() end
 
-  reaper.ImGui_Separator(ctx)
-  reaper.ImGui_Text(ctx, "Comments")
-  reaper.ImGui_SameLine(ctx)
-  if reaper.ImGui_Button(ctx, "Refresh##comments") then load_comments() end
+  section_title("Comments", #state.comments > 0 and (#state.comments .. " on current rough") or "")
+  if reaper.ImGui_Button(ctx, "Refresh comments") then load_comments() end
   if #state.comments == 0 then
-    reaper.ImGui_TextWrapped(ctx, "No comments yet.")
+    empty_state("No comments yet.")
   else
+    reaper.ImGui_BeginChild(ctx, "comment_list", 0, 150, true)
     for _, c in ipairs(state.comments) do
       local who = c.author_name or "?"
       local at = c.timestamp_ms and (" @" .. fmt_ts(c.timestamp_ms)) or ""
       local text = c.is_voice and "[voice memo]" or (c.body or "")
-      reaper.ImGui_TextWrapped(ctx, who .. at .. ": " .. text)
+      reaper.ImGui_TextColored(ctx, COLORS.coral, who .. at)
+      reaper.ImGui_TextWrapped(ctx, text)
+      reaper.ImGui_Separator(ctx)
     end
+    reaper.ImGui_EndChild(ctx)
   end
+  reaper.ImGui_SetNextItemWidth(ctx, content_width())
   changed, state.comment_body = reaper.ImGui_InputText(ctx, "New comment", state.comment_body)
   changed, state.comment_at_cursor = reaper.ImGui_Checkbox(ctx, "At edit cursor", state.comment_at_cursor)
-  if reaper.ImGui_Button(ctx, "Post comment") then post_comment() end
+  if primary_button("Post comment") then post_comment() end
   reaper.ImGui_SameLine(ctx)
   if state.recording then
-    if reaper.ImGui_Button(ctx, "Stop & post voice memo") then stop_and_post_voice() end
+    if reaper.ImGui_Button(ctx, "Stop and post voice memo") then stop_and_post_voice() end
   else
     if reaper.ImGui_Button(ctx, "Record voice memo") then start_voice_record() end
   end
 end
 
 local function loop()
+  push_theme()
   local visible, open = reaper.ImGui_Begin(ctx, "Take", true)
   if visible then
+    reaper.ImGui_TextColored(ctx, COLORS.ink, "Take")
+    reaper.ImGui_SameLine(ctx)
+    muted_text(state.recording and "recording voice memo" or "Reaper collaboration panel")
     if reaper.ImGui_Button(ctx, state.show_settings and "Close settings" or "Settings") then
       state.show_settings = not state.show_settings
     end
-    reaper.ImGui_Separator(ctx)
 
     if state.show_settings then
       draw_settings()
@@ -701,12 +849,10 @@ local function loop()
       draw_projects()
     end
 
-    if state.status ~= "" then
-      reaper.ImGui_Separator(ctx)
-      reaper.ImGui_TextWrapped(ctx, state.status)
-    end
+    draw_status()
     reaper.ImGui_End(ctx)
   end
+  pop_theme()
   if open then reaper.defer(loop) end
 end
 
