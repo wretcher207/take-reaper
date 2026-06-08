@@ -30,9 +30,9 @@ The Reaper panel talks to the Take web app over HTTPS. Your collaborator doesn't
 
 ## Connect
 
-1. Go to [take-ebon.vercel.app/settings/reaper](https://take-ebon.vercel.app/settings/reaper), create an API token, and copy the full token once.
+1. Go to [takeaudio.com/settings/reaper](https://takeaudio.com/settings/reaper), create an API token, and copy the full token once.
 2. In the Take panel inside Reaper, open **Settings**.
-3. Paste `https://take-ebon.vercel.app` into **Server URL**.
+3. Paste `https://takeaudio.com` into **Server URL**.
 4. Paste the full `take_...` token into **API token**, then click **Done**.
 5. Your paid projects appear. Click one to see its stems and roughs.
 

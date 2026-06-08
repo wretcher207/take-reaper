@@ -1,9 +1,9 @@
 -- @description Take for Reaper
--- @version 0.5.2
+-- @version 0.5.3
 -- @author Dead Pixel Design
 -- @about
 --   A docked panel that connects this Reaper session to your Take projects.
---   Paste an API token (create one at take-ebon.vercel.app/settings/reaper), browse the
+--   Paste an API token (create one at takeaudio.com/settings/reaper), browse the
 --   projects you collaborate on, pull stems onto tracks at their timecode, and
 --   push back: render the selected track as a new stem, or render the master as
 --   a new rough. Read the project's comments and drop your own from the panel —
@@ -20,12 +20,16 @@ if not reaper.ImGui_GetVersion then
 end
 
 local EXT = "TAKE"
-local DEFAULT_BASE_URL = "https://take-ebon.vercel.app"
+local DEFAULT_BASE_URL = "https://takeaudio.com"
 local ctx = reaper.ImGui_CreateContext("Take")
 
+local function trim(s)
+  return tostring(s or ""):match("^%s*(.-)%s*$")
+end
+
 local state = {
-  base_url = reaper.GetExtState(EXT, "base_url"),
-  token = reaper.GetExtState(EXT, "token"),
+  base_url = trim(reaper.GetExtState(EXT, "base_url")),
+  token = trim(reaper.GetExtState(EXT, "token")),
   view = "projects", -- "projects" | "project"
   projects = {},
   project = nil, -- { id, name }
@@ -39,7 +43,14 @@ local state = {
   recording = false,
   voice = nil, -- in-flight voice-memo record state (temp track, saved arm, cursor)
 }
-if state.base_url == "" then state.base_url = DEFAULT_BASE_URL end
+if state.base_url == ""
+    or state.base_url == "https://take-ebon.vercel.app"
+    or state.base_url:find("raw.githubusercontent.com", 1, true) then
+  state.base_url = DEFAULT_BASE_URL
+  reaper.SetExtState(EXT, "base_url", state.base_url, true)
+else
+  state.base_url = state.base_url:gsub("/+$", "")
+end
 
 -- Formats Take accepts (matches the web upload policy).
 local ACCEPTED = { wav = true, aif = true, aiff = true, flac = true, mp3 = true }
@@ -390,7 +401,22 @@ local function load_projects()
   if state.token == "" then state.status = "Add a token in Settings first."; return end
   state.status = "Loading projects…"
   local http, body = http_get_json("/api/reaper/projects")
-  if http == 401 then state.status = "Token rejected. Check it in Settings."; return end
+  if http == 0 then
+    state.status = "No response from server. Use Server URL " .. DEFAULT_BASE_URL .. "."
+    return
+  end
+  if http == 401 then
+    if body:find("Authentication Required", 1, true) then
+      state.status = "That server is Vercel-protected. Use " .. DEFAULT_BASE_URL .. "."
+    else
+      state.status = "Token rejected. Check it in Settings."
+    end
+    return
+  end
+  if http == 404 and body:find("DEPLOYMENT_NOT_FOUND", 1, true) then
+    state.status = "Old server URL is dead. Use " .. DEFAULT_BASE_URL .. "."
+    return
+  end
   if http ~= 200 then state.status = "Couldn't load projects (" .. http .. ")."; return end
   local data = json_decode(body)
   state.projects = (data and data.projects) or {}
@@ -919,7 +945,7 @@ local function draw_settings()
   reaper.ImGui_SetNextItemWidth(ctx, content_width())
   changed, state.base_url = reaper.ImGui_InputText(ctx, "##server_url", state.base_url)
   if changed then
-    state.base_url = state.base_url:gsub("/+$", "")
+    state.base_url = trim(state.base_url):gsub("/+$", "")
     reaper.SetExtState(EXT, "base_url", state.base_url, true)
   end
   if reaper.ImGui_Button(ctx, "Use live server") then
@@ -931,7 +957,10 @@ local function draw_settings()
   reaper.ImGui_SetNextItemWidth(ctx, content_width())
   changed, state.token = reaper.ImGui_InputText(ctx, "##api_token", state.token,
     reaper.ImGui_InputTextFlags_Password())
-  if changed then reaper.SetExtState(EXT, "token", state.token, true) end
+  if changed then
+    state.token = trim(state.token)
+    reaper.SetExtState(EXT, "token", state.token, true)
+  end
   if primary_button("Done", content_width()) then state.show_settings = false; load_projects() end
 end
 

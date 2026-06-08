@@ -4,8 +4,12 @@
     <reapack name="Take.lua" type="script" desc="Take docked panel">
       <metadata>
         <description><![CDATA[Take — the layer between your DAW and the people you make music with.]]></description>
-        <link rel="website">https://take-ebon.vercel.app</link>
+        <link rel="website">https://takeaudio.com</link>
       </metadata>
+      <version name="0.5.3" author="Dead Pixel Design" time="2026-06-08T16:00:00Z">
+        <changelog><![CDATA[Switches the Reaper server to takeaudio.com and auto-repairs stale saved URLs.]]></changelog>
+        <source main="main">Take.lua</source>
+      </version>
       <version name="0.5.2" author="Dead Pixel Design" time="2026-06-08T15:00:00Z">
         <changelog><![CDATA[Clarifies the Server URL and API token fields in the Reaper settings panel.]]></changelog>
         <source main="main">Take.lua</source>
