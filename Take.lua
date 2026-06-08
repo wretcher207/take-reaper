@@ -1,5 +1,5 @@
 -- @description Take for Reaper
--- @version 0.6.0
+-- @version 0.6.1
 -- @author Dead Pixel Design
 -- @about
 --   A docked panel that connects this Reaper session to your Take projects.
@@ -253,15 +253,23 @@ local function curl_bin()
   return CURL
 end
 
+-- Resolve the file/URL opener by absolute path for the same reason as curl_bin:
+-- REAPER's ExecProcess inherits an empty PATH (launchd on macOS), so a bare
+-- "open"/"xdg-open" never launches and the browser/file silently fails to open.
+-- Checking the path also sidesteps GetOS returning "macOS-arm64" (no "OSX").
 local function open_file(path)
   local os_name = reaper.GetOS() or ""
   local cmd
   if os_name:find("Win") then
     cmd = "cmd /c start \"\" " .. q(path)
-  elseif os_name:find("OSX") then
-    cmd = "open " .. q(path)
   else
-    cmd = "xdg-open " .. q(path)
+    local opener
+    for _, p in ipairs({ "/usr/bin/open", "/usr/bin/xdg-open", "/bin/open" }) do
+      local f = io.open(p, "rb")
+      if f then f:close(); opener = p; break end
+    end
+    opener = opener or (os_name:find("OSX") and "open" or "xdg-open")
+    cmd = opener .. " " .. q(path)
   end
   reaper.ExecProcess(cmd, 1000)
 end
