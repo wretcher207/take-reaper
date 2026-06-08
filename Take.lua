@@ -1,5 +1,5 @@
 -- @description Take for Reaper
--- @version 0.5.3
+-- @version 0.6.0
 -- @author Dead Pixel Design
 -- @about
 --   A docked panel that connects this Reaper session to your Take projects.
@@ -42,6 +42,7 @@ local state = {
   show_settings = false,
   recording = false,
   voice = nil, -- in-flight voice-memo record state (temp track, saved arm, cursor)
+  pairing = nil, -- in-flight one-click Connect (device_code, deadline, next_poll)
 }
 if state.base_url == ""
     or state.base_url == "https://take-ebon.vercel.app"
@@ -218,6 +219,40 @@ end
 
 local function q(s) return '"' .. tostring(s):gsub('"', '') .. '"' end
 
+-- Resolve the curl executable once. REAPER's ExecProcess does not reliably
+-- inherit the user's shell PATH, so a bare "curl" can fail to launch and return
+-- no output (read back as http == 0, "No response from server") even though curl
+-- is installed and the URL is correct. This bites macOS just as hard as Windows:
+-- when REAPER is launched from Finder/Dock its PATH comes from launchd, which is
+-- often empty, so a bare "curl" has nothing to resolve against. We therefore
+-- prefer a known absolute path on every OS and only fall back to bare "curl" if
+-- none of the candidates exist, so a PATH that already worked keeps working.
+-- NOTE: do NOT quote the resolved path. None of the candidate paths contain a
+-- space, and a Windows command line that both starts and ends with a quote trips
+-- cmd.exe's outer-quote stripping (when ExecProcess routes through cmd), which
+-- mangles the exe path and re-breaks the launch we're trying to fix.
+local CURL
+local function curl_bin()
+  if CURL then return CURL end
+  local os_name = reaper.GetOS() or ""
+  if os_name:find("Win") then
+    local sysroot = os.getenv("SystemRoot") or os.getenv("windir") or "C:\\Windows"
+    local sys_curl = sysroot .. "\\System32\\curl.exe"
+    local f = io.open(sys_curl, "rb")
+    if f then f:close(); CURL = sys_curl; return CURL end
+  else
+    -- macOS ships curl at /usr/bin/curl; Homebrew (Apple Silicon / Intel) and
+    -- most Linux distros cover the rest. First one that exists wins.
+    local candidates = { "/usr/bin/curl", "/opt/homebrew/bin/curl", "/usr/local/bin/curl", "/bin/curl" }
+    for _, path in ipairs(candidates) do
+      local f = io.open(path, "rb")
+      if f then f:close(); CURL = path; return CURL end
+    end
+  end
+  CURL = "curl"
+  return CURL
+end
+
 local function open_file(path)
   local os_name = reaper.GetOS() or ""
   local cmd
@@ -283,7 +318,7 @@ end
 local function http_get_json(path)
   local out_file = tmp_path("resp.json")
   local url = state.base_url .. path
-  local cmd = "curl -s -H " .. q("Authorization: Bearer " .. state.token)
+  local cmd = curl_bin() .. " -s -H " .. q("Authorization: Bearer " .. state.token)
     .. " -o " .. q(out_file)
     .. " -w " .. q("%{http_code}")
     .. " " .. q(url)
@@ -300,7 +335,7 @@ local function http_post_json(path, tbl)
 
   local out_file = tmp_path("resp.json")
   local url = state.base_url .. path
-  local cmd = "curl -s -X POST"
+  local cmd = curl_bin() .. " -s -X POST"
     .. " -H " .. q("Authorization: Bearer " .. state.token)
     .. " -H " .. q("Content-Type: application/json")
     .. " --data-binary " .. q("@" .. body_file)
@@ -313,7 +348,7 @@ end
 
 -- Download a (pre-signed) URL to dest. Returns http_status.
 local function http_download(url, dest)
-  local cmd = "curl -s -L -o " .. q(dest) .. " -w " .. q("%{http_code}") .. " " .. q(url)
+  local cmd = curl_bin() .. " -s -L -o " .. q(dest) .. " -w " .. q("%{http_code}") .. " " .. q(url)
   return status_from(reaper.ExecProcess(cmd, 120000))
 end
 
@@ -322,7 +357,7 @@ end
 -- otherwise status_from would parse a digit out of the JSON body.
 local function http_upload(url, filepath, content_type)
   local out_file = tmp_path("upload_resp.txt")
-  local cmd = "curl -s -X PUT -T " .. q(filepath)
+  local cmd = curl_bin() .. " -s -X PUT -T " .. q(filepath)
     .. " -H " .. q("Content-Type: " .. content_type)
     .. " -o " .. q(out_file)
     .. " -w " .. q("%{http_code}")
@@ -402,7 +437,7 @@ local function load_projects()
   state.status = "Loading projects…"
   local http, body = http_get_json("/api/reaper/projects")
   if http == 0 then
-    state.status = "No response from server. Use Server URL " .. DEFAULT_BASE_URL .. "."
+    state.status = "No response — curl couldn't run from REAPER. Restart REAPER; if it persists, update Take in ReaPack."
     return
   end
   if http == 401 then
@@ -937,6 +972,67 @@ local function draw_status()
   reaper.ImGui_EndChild(ctx)
 end
 
+-- One-click Connect (the OAuth device grant). Ask the server for a pairing, open
+-- the browser for the user to approve, then poll until it hands back a token. The
+-- user never sees or pastes a key.
+local function start_pairing()
+  state.pairing = nil
+  local http, body = http_post_json("/api/reaper/pair/start", {})
+  if http == 0 then
+    state.status = "No response — curl couldn't run from REAPER. Restart REAPER; if it persists, update Take in ReaPack."
+    return
+  end
+  if http ~= 200 then
+    state.status = "Couldn't start Connect (server said " .. tostring(http) .. ")."
+    return
+  end
+  local ok, data = pcall(json_decode, body)
+  if not ok or type(data) ~= "table" or not data.device_code or not data.verify_url then
+    state.status = "Couldn't start Connect (unexpected response)."
+    return
+  end
+  state.pairing = {
+    device_code = data.device_code,
+    deadline = reaper.time_precise() + (tonumber(data.expires_in) or 600),
+    next_poll = reaper.time_precise() + (tonumber(data.interval) or 2),
+  }
+  open_file(data.verify_url)
+  state.status = "Waiting for you to approve Take in your browser…"
+end
+
+-- Called every frame while a pairing is in flight; throttled to the server's
+-- interval. Saves the token and loads projects the moment approval lands.
+local function poll_pairing()
+  local p = state.pairing
+  if not p then return end
+  local now = reaper.time_precise()
+  if now > p.deadline then
+    state.pairing = nil
+    state.status = "Connect timed out. Open Settings and try again."
+    return
+  end
+  if now < p.next_poll then return end
+  p.next_poll = now + 2
+
+  local http, body = http_get_json("/api/reaper/pair/poll?device_code=" .. p.device_code)
+  if http ~= 200 then return end -- transient; keep waiting until the deadline
+  local ok, data = pcall(json_decode, body)
+  if not ok or type(data) ~= "table" then return end
+
+  if data.status == "approved" and data.token then
+    state.pairing = nil
+    state.token = trim(data.token)
+    reaper.SetExtState(EXT, "token", state.token, true)
+    state.show_settings = false
+    state.status = "Connected."
+    load_projects()
+  elseif data.status == "expired" or data.status == "denied" or data.status == "not-found" then
+    state.pairing = nil
+    state.status = "Connect failed (" .. tostring(data.status) .. "). Open Settings and try again."
+  end
+  -- "pending": the user hasn't approved yet; keep waiting silently.
+end
+
 local function draw_settings()
   section_title("Connection", "Take account")
   local changed
@@ -952,8 +1048,16 @@ local function draw_settings()
     state.base_url = DEFAULT_BASE_URL
     reaper.SetExtState(EXT, "base_url", state.base_url, true)
   end
-  muted_text("API token")
-  reaper.ImGui_TextWrapped(ctx, "Create a token at " .. DEFAULT_BASE_URL .. "/settings/reaper, then paste the full take_ token here.")
+  muted_text("Connect")
+  if state.pairing then
+    reaper.ImGui_TextWrapped(ctx, "Waiting for you to approve Take in your browser. Come back here once you have.")
+    if reaper.ImGui_Button(ctx, "Cancel") then state.pairing = nil; state.status = "" end
+  else
+    reaper.ImGui_TextWrapped(ctx, "Click Connect, approve Take in the browser tab that opens, and you're in. No key to copy.")
+    if primary_button("Connect", content_width()) then start_pairing() end
+  end
+  muted_text("API token (optional)")
+  reaper.ImGui_TextWrapped(ctx, "Prefer to paste a key? Create one at " .. DEFAULT_BASE_URL .. "/settings/reaper and paste the full take_ token here. Connect above is easier.")
   reaper.ImGui_SetNextItemWidth(ctx, content_width())
   changed, state.token = reaper.ImGui_InputText(ctx, "##api_token", state.token,
     reaper.ImGui_InputTextFlags_Password())
@@ -1043,6 +1147,7 @@ end
 
 local function loop()
   push_theme()
+  if state.pairing then poll_pairing() end
   local visible, open = reaper.ImGui_Begin(ctx, "Take", true)
   if visible then
     reaper.ImGui_TextColored(ctx, COLORS.ink, "Take")

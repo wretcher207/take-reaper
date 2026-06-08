@@ -6,6 +6,18 @@
         <description><![CDATA[Take — the layer between your DAW and the people you make music with.]]></description>
         <link rel="website">https://takeaudio.com</link>
       </metadata>
+      <version name="0.6.0" author="Dead Pixel Design" time="2026-06-08T21:00:00Z">
+        <changelog><![CDATA[One-click Connect: click Connect, approve Take in your browser, and the panel pairs itself — no API key to copy or paste (pasting a token by hand still works as a fallback). Also fixes "No response from server" on macOS/Linux: curl is now resolved by absolute path on every OS, not just Windows, so it launches even when REAPER inherits an empty PATH.]]></changelog>
+        <source main="main">Take.lua</source>
+      </version>
+      <version name="0.5.5" author="Dead Pixel Design" time="2026-06-08T19:00:00Z">
+        <changelog><![CDATA[Fix "No response from server": resolve curl by absolute path (unquoted, so cmd.exe can't mangle it) so it launches even when REAPER's environment lacks curl on PATH.]]></changelog>
+        <source main="main">Take.lua</source>
+      </version>
+      <version name="0.5.4" author="Dead Pixel Design" time="2026-06-08T18:00:00Z">
+        <changelog><![CDATA[Fix "No response from server": resolve curl by absolute path so it runs even when REAPER's environment lacks it on PATH.]]></changelog>
+        <source main="main">Take.lua</source>
+      </version>
       <version name="0.5.3" author="Dead Pixel Design" time="2026-06-08T16:00:00Z">
         <changelog><![CDATA[Switches the Reaper server to takeaudio.com and auto-repairs stale saved URLs.]]></changelog>
         <source main="main">Take.lua</source>
