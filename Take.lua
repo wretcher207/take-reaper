@@ -1,9 +1,9 @@
 -- @description Take for Reaper
--- @version 0.5.1
+-- @version 0.5.2
 -- @author Dead Pixel Design
 -- @about
 --   A docked panel that connects this Reaper session to your Take projects.
---   Paste an API token (create one at take-ebon.vercel.app -> Reaper access), browse the
+--   Paste an API token (create one at take-ebon.vercel.app/settings/reaper), browse the
 --   projects you collaborate on, pull stems onto tracks at their timecode, and
 --   push back: render the selected track as a new stem, or render the master as
 --   a new rough. Read the project's comments and drop your own from the panel —
@@ -20,6 +20,7 @@ if not reaper.ImGui_GetVersion then
 end
 
 local EXT = "TAKE"
+local DEFAULT_BASE_URL = "https://take-ebon.vercel.app"
 local ctx = reaper.ImGui_CreateContext("Take")
 
 local state = {
@@ -38,7 +39,7 @@ local state = {
   recording = false,
   voice = nil, -- in-flight voice-memo record state (temp track, saved arm, cursor)
 }
-if state.base_url == "" then state.base_url = "https://take-ebon.vercel.app" end
+if state.base_url == "" then state.base_url = DEFAULT_BASE_URL end
 
 -- Formats Take accepts (matches the web upload policy).
 local ACCEPTED = { wav = true, aif = true, aiff = true, flac = true, mp3 = true }
@@ -913,16 +914,22 @@ end
 local function draw_settings()
   section_title("Connection", "Take account")
   local changed
-  muted_text("Server")
+  muted_text("Server URL")
+  reaper.ImGui_TextWrapped(ctx, "Use " .. DEFAULT_BASE_URL .. " for the live Take app. This is not the ReaPack install URL.")
   reaper.ImGui_SetNextItemWidth(ctx, content_width())
-  changed, state.base_url = reaper.ImGui_InputText(ctx, "Server URL", state.base_url)
+  changed, state.base_url = reaper.ImGui_InputText(ctx, "##server_url", state.base_url)
   if changed then
     state.base_url = state.base_url:gsub("/+$", "")
     reaper.SetExtState(EXT, "base_url", state.base_url, true)
   end
+  if reaper.ImGui_Button(ctx, "Use live server") then
+    state.base_url = DEFAULT_BASE_URL
+    reaper.SetExtState(EXT, "base_url", state.base_url, true)
+  end
   muted_text("API token")
+  reaper.ImGui_TextWrapped(ctx, "Create a token at " .. DEFAULT_BASE_URL .. "/settings/reaper, then paste the full take_ token here.")
   reaper.ImGui_SetNextItemWidth(ctx, content_width())
-  changed, state.token = reaper.ImGui_InputText(ctx, "API token", state.token,
+  changed, state.token = reaper.ImGui_InputText(ctx, "##api_token", state.token,
     reaper.ImGui_InputTextFlags_Password())
   if changed then reaper.SetExtState(EXT, "token", state.token, true) end
   if primary_button("Done", content_width()) then state.show_settings = false; load_projects() end
