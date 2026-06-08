@@ -1,5 +1,5 @@
 -- @description Take for Reaper
--- @version 0.5.0
+-- @version 0.5.1
 -- @author Dead Pixel Design
 -- @about
 --   A docked panel that connects this Reaper session to your Take projects.
@@ -239,11 +239,33 @@ local function safe_remove(path)
   if path and path ~= "" then pcall(os.remove, path) end
 end
 
--- Pull the http status (last line) out of ExecProcess's "<exitcode>\n<stdout>".
+-- Clean up stale temp files from previous sessions on startup. Any render/voice
+-- temp from a prior run is dead weight — the only live temps are created
+-- during the current session. Also catches curl resp/req JSON bodies.
+local function cleanup_stale_temps()
+  local base = reaper.GetResourcePath() .. "/Scripts/"
+  local prefixes = { "take_render_", "take_voice_", "take_resp.json", "take_req.json", "take_upload_resp.txt" }
+  for _, prefix in ipairs(prefixes) do
+    local i = 0
+    while true do
+      local name = reaper.EnumerateFiles(base, i)
+      if not name then break end
+      i = i + 1
+      if name:sub(1, #prefix) == prefix then
+        pcall(os.remove, base .. name)
+      end
+    end
+  end
+end
+cleanup_stale_temps()
+
+-- Pull the http status code out of ExecProcess's "<exitcode>\n<stdout>".
+-- curl -w "%{http_code}" writes exactly three digits to stdout; anchor on that
+-- so stray numbers in error text don't produce a false match.
 local function status_from(out)
   out = out or ""
-  local nl = out:find("\n")
-  return tonumber((out:sub((nl or 0) + 1)):match("%d+")) or 0
+  local code = out:match("\n(%d%d%d)\n*$")
+  return tonumber(code) or 0
 end
 
 local function http_get_json(path)
@@ -345,9 +367,9 @@ local function render_to_temp(render_settings, pattern)
   reaper.GetSetProjectInfo_String(0, "RENDER_FILE", s_file, true)
   reaper.GetSetProjectInfo_String(0, "RENDER_PATTERN", s_pat, true)
 
-  -- 42230 renders synchronously, but allow a brief settle in case the file
-  -- handle lags behind the action returning.
-  local deadline = reaper.time_precise() + 10.0
+  -- 42230 renders synchronously, but large sessions with heavy plugins can
+  -- take a moment for the file handle to settle. Poll for up to 30 seconds.
+  local deadline = reaper.time_precise() + 30.0
   repeat
     local file, ext = find_rendered(dir)
     if file then return file, ext end
@@ -680,7 +702,7 @@ local function do_push(kind, render_settings, pattern, name, extra, on_done)
   state.status = "Rendering…"
   local file, ext = render_to_temp(render_settings, pattern)
   if not file then
-    state.status = "No render produced. Set REAPER's render format to WAV, AIFF, FLAC, or MP3."
+    state.status = "Render didn't produce an accepted file. Check your render format — WAV, AIFF, FLAC, or MP3."
     return false
   end
 
@@ -828,7 +850,7 @@ local function muted_text(text)
 end
 
 local function empty_state(text)
-  reaper.ImGui_BeginChild(ctx, "empty_" .. text, 0, 48, true)
+  reaper.ImGui_BeginChild(ctx, "empty_" .. text, 0, 48)
   muted_text(text)
   reaper.ImGui_EndChild(ctx)
 end
@@ -883,7 +905,7 @@ local function draw_status()
   end
 
   reaper.ImGui_Spacing(ctx)
-  reaper.ImGui_BeginChild(ctx, "status", 0, 44, true)
+  reaper.ImGui_BeginChild(ctx, "status", 0, 44)
   reaper.ImGui_TextColored(ctx, color, state.status)
   reaper.ImGui_EndChild(ctx)
 end
@@ -894,7 +916,10 @@ local function draw_settings()
   muted_text("Server")
   reaper.ImGui_SetNextItemWidth(ctx, content_width())
   changed, state.base_url = reaper.ImGui_InputText(ctx, "Server URL", state.base_url)
-  if changed then reaper.SetExtState(EXT, "base_url", state.base_url, true) end
+  if changed then
+    state.base_url = state.base_url:gsub("/+$", "")
+    reaper.SetExtState(EXT, "base_url", state.base_url, true)
+  end
   muted_text("API token")
   reaper.ImGui_SetNextItemWidth(ctx, content_width())
   changed, state.token = reaper.ImGui_InputText(ctx, "API token", state.token,
@@ -915,7 +940,7 @@ local function draw_projects()
     return
   end
 
-  reaper.ImGui_BeginChild(ctx, "project_list", 0, 220, true)
+  reaper.ImGui_BeginChild(ctx, "project_list", 0, 220)
   for i, p in ipairs(state.projects) do
     local label = tostring(i) .. ". " .. p.name .. "##" .. p.id
     if reaper.ImGui_Selectable(ctx, label) then open_project(p) end
@@ -933,7 +958,7 @@ local function draw_project()
   if #state.stems == 0 then
     empty_state("No stems in this project yet.")
   else
-    reaper.ImGui_BeginChild(ctx, "stem_list", 0, 128, true)
+    reaper.ImGui_BeginChild(ctx, "stem_list", 0, 128)
     for _, s in ipairs(state.stems) do
       reaper.ImGui_TextWrapped(ctx, s.name)
       reaper.ImGui_SameLine(ctx)
@@ -961,7 +986,7 @@ local function draw_project()
   if #state.comments == 0 then
     empty_state("No comments yet.")
   else
-    reaper.ImGui_BeginChild(ctx, "comment_list", 0, 150, true)
+    reaper.ImGui_BeginChild(ctx, "comment_list", 0, 150)
     for _, c in ipairs(state.comments) do
       draw_comment_item(c)
     end

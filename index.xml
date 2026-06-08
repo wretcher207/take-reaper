@@ -6,6 +6,10 @@
         <description><![CDATA[Take — the layer between your DAW and the people you make music with.]]></description>
         <link rel="website">https://take-ebon.vercel.app</link>
       </metadata>
+      <version name="0.5.1" author="Dead Pixel Design" time="2026-06-08T14:00:00Z">
+        <changelog><![CDATA[Hotfix: startup temp cleanup, ReaImGui child windows, and render/status handling.]]></changelog>
+        <source main="main">Take.lua</source>
+      </version>
       <version name="0.5.0" author="Dead Pixel Design" time="2026-05-26T12:00:00Z">
         <changelog><![CDATA[Session review: jump from comments to the edit cursor, drop Take markers, and open voice memos from the panel.]]></changelog>
         <source main="main">Take.lua</source>
