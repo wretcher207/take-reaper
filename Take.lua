@@ -1,5 +1,5 @@
 -- @description Take for Reaper
--- @version 0.6.2
+-- @version 0.6.3
 -- @author Dead Pixel Design
 -- @about
 --   A docked panel that connects this Reaper session to your Take projects.
@@ -43,6 +43,7 @@ local state = {
   recording = false,
   voice = nil, -- in-flight voice-memo record state (temp track, saved arm, cursor)
   pairing = nil, -- in-flight one-click Connect (device_code, deadline, next_poll)
+  scroll_comments = false, -- set after post_comment to auto-scroll to bottom
 }
 if state.base_url == ""
     or state.base_url == "https://take-ebon.vercel.app"
@@ -517,6 +518,8 @@ end
 
 local function open_project(p)
   state.status = "Loading " .. p.name .. "…"
+  state.comments = {}
+  state.scroll_comments = false
   local http, body = http_get_json("/api/reaper/projects/" .. p.id)
   if http ~= 200 then state.status = "Couldn't open project (" .. http .. ")."; return end
   local data = json_decode(body)
@@ -542,20 +545,26 @@ local function post_comment()
   if http == 401 then state.status = "Token rejected. Check it in Settings."; return end
   if http == 403 then state.status = "This project's owner isn't on a paid plan."; return end
   if http ~= 200 then state.status = "Couldn't post comment (" .. http .. ")."; return end
-  -- Use the server-returned comment for an immediate optimistic insert so the
-  -- comment lands in the list even if the follow-up load_comments GET fails.
-  local created = json_decode(resp_body)
-  if created and type(created) == "table" then
-    if not created.id then created.id = created.created_at end -- fake a key if missing
+  -- The server now returns the full created comment in the "comment" field
+  -- so the panel can show it immediately without waiting for the GET refresh.
+  local resp = json_decode(resp_body)
+  local created = resp and resp.comment
+  local degraded = created and created.degraded_to_project_note
+  if created and type(created) == "table" and created.id then
     state.comments[#state.comments + 1] = created
   end
   state.comment_body = ""
   load_comments()
   -- If the GET came back empty but we just inserted a comment, keep it visible.
-  if #state.comments == 0 and created and type(created) == "table" then
+  if #state.comments == 0 and created and type(created) == "table" and created.id then
     state.comments[#state.comments + 1] = created
   end
-  state.status = "Comment posted."
+  state.scroll_comments = true
+  if degraded then
+    state.status = "Posted as a project note (no current rough to pin to)."
+  else
+    state.status = "Comment posted."
+  end
 end
 
 local function jump_to_comment(c)
@@ -1152,6 +1161,10 @@ local function draw_project()
     if reaper.ImGui_BeginChild(ctx, "comment_list", 0, 220) then
       for _, c in ipairs(state.comments) do
         draw_comment_item(c)
+      end
+      if state.scroll_comments then
+        reaper.ImGui_SetScrollHereY(ctx, 1.0)
+        state.scroll_comments = false
       end
       reaper.ImGui_EndChild(ctx)
     end

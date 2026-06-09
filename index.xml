@@ -6,6 +6,10 @@
         <description><![CDATA[Take — the layer between your DAW and the people you make music with.]]></description>
         <link rel="website">https://takeaudio.com</link>
       </metadata>
+      <version name="0.6.3" author="Dead Pixel Design" time="2026-06-09T18:30:00Z">
+        <changelog><![CDATA[Comments now display instantly with full author/timestamp from the server response, auto-scroll to the new comment after posting, and warn when a timestamped comment had to fall back to a project note because there is no current rough. Also clears stale comments when switching projects.]]></changelog>
+        <source main="main">https://takeaudio.com/reaper/Take.lua</source>
+      </version>
       <version name="0.6.2" author="Dead Pixel Design" time="2026-06-09T18:00:00Z">
         <changelog><![CDATA[Comments now land immediately: the panel inserts the server-returned comment right after posting so it's visible even if the follow-up refresh is slow or fails. Window defaults to a usable size (450×700) so the comment list isn't hidden below the fold.]]></changelog>
         <source main="main">https://takeaudio.com/reaper/Take.lua</source>
