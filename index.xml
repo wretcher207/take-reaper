@@ -6,6 +6,10 @@
         <description><![CDATA[Take — the layer between your DAW and the people you make music with.]]></description>
         <link rel="website">https://takeaudio.com</link>
       </metadata>
+      <version name="0.6.2" author="Dead Pixel Design" time="2026-06-09T18:00:00Z">
+        <changelog><![CDATA[Comments now land immediately: the panel inserts the server-returned comment right after posting so it's visible even if the follow-up refresh is slow or fails. Window defaults to a usable size (450×700) so the comment list isn't hidden below the fold.]]></changelog>
+        <source main="main">https://takeaudio.com/reaper/Take.lua</source>
+      </version>
       <version name="0.6.1" author="Dead Pixel Design" time="2026-06-08T23:30:00Z">
         <changelog><![CDATA[Fix Connect not opening the browser on macOS: the file/URL opener is now resolved by absolute path (/usr/bin/open) like curl, so it launches under REAPER's empty PATH.]]></changelog>
         <source main="main">https://takeaudio.com/reaper/Take.lua</source>

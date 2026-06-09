@@ -1,5 +1,5 @@
 -- @description Take for Reaper
--- @version 0.6.1
+-- @version 0.6.2
 -- @author Dead Pixel Design
 -- @about
 --   A docked panel that connects this Reaper session to your Take projects.
@@ -538,12 +538,23 @@ local function post_comment()
     payload.timestampMs = math.floor((reaper.GetCursorPosition() or 0) * 1000)
   end
   state.status = "Posting comment…"
-  local http = select(1, http_post_json("/api/reaper/projects/" .. state.project.id .. "/comments", payload))
+  local http, resp_body = http_post_json("/api/reaper/projects/" .. state.project.id .. "/comments", payload)
   if http == 401 then state.status = "Token rejected. Check it in Settings."; return end
   if http == 403 then state.status = "This project's owner isn't on a paid plan."; return end
   if http ~= 200 then state.status = "Couldn't post comment (" .. http .. ")."; return end
+  -- Use the server-returned comment for an immediate optimistic insert so the
+  -- comment lands in the list even if the follow-up load_comments GET fails.
+  local created = json_decode(resp_body)
+  if created and type(created) == "table" then
+    if not created.id then created.id = created.created_at end -- fake a key if missing
+    state.comments[#state.comments + 1] = created
+  end
   state.comment_body = ""
   load_comments()
+  -- If the GET came back empty but we just inserted a comment, keep it visible.
+  if #state.comments == 0 and created and type(created) == "table" then
+    state.comments[#state.comments + 1] = created
+  end
   state.status = "Comment posted."
 end
 
@@ -1138,7 +1149,7 @@ local function draw_project()
   if #state.comments == 0 then
     empty_state("No comments yet.")
   else
-    if reaper.ImGui_BeginChild(ctx, "comment_list", 0, 150) then
+    if reaper.ImGui_BeginChild(ctx, "comment_list", 0, 220) then
       for _, c in ipairs(state.comments) do
         draw_comment_item(c)
       end
@@ -1161,6 +1172,8 @@ end
 local function loop()
   push_theme()
   if state.pairing then poll_pairing() end
+  reaper.ImGui_SetNextWindowSize(ctx, 450, 700, reaper.ImGui_Cond_FirstUseEver())
+  reaper.ImGui_SetNextWindowSizeConstraints(ctx, 360, 480, -1, -1)
   local visible, open = reaper.ImGui_Begin(ctx, "Take", true)
   if visible then
     reaper.ImGui_TextColored(ctx, COLORS.ink, "Take")
