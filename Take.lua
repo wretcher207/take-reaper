@@ -920,9 +920,10 @@ local function muted_text(text)
 end
 
 local function empty_state(text)
-  reaper.ImGui_BeginChild(ctx, "empty_" .. text, 0, 48)
-  muted_text(text)
-  reaper.ImGui_EndChild(ctx)
+  if reaper.ImGui_BeginChild(ctx, "empty_" .. text, 0, 48) then
+    muted_text(text)
+    reaper.ImGui_EndChild(ctx)
+  end
 end
 
 local function primary_button(label, width)
@@ -975,9 +976,10 @@ local function draw_status()
   end
 
   reaper.ImGui_Spacing(ctx)
-  reaper.ImGui_BeginChild(ctx, "status", 0, 44)
-  reaper.ImGui_TextColored(ctx, color, state.status)
-  reaper.ImGui_EndChild(ctx)
+  if reaper.ImGui_BeginChild(ctx, "status", 0, 44) then
+    reaper.ImGui_TextColored(ctx, color, state.status)
+    reaper.ImGui_EndChild(ctx)
+  end
 end
 
 -- One-click Connect (the OAuth device grant). Ask the server for a pairing, open
@@ -1088,12 +1090,13 @@ local function draw_projects()
     return
   end
 
-  reaper.ImGui_BeginChild(ctx, "project_list", 0, 220)
-  for i, p in ipairs(state.projects) do
-    local label = tostring(i) .. ". " .. p.name .. "##" .. p.id
-    if reaper.ImGui_Selectable(ctx, label) then open_project(p) end
+  if reaper.ImGui_BeginChild(ctx, "project_list", 0, 220) then
+    for i, p in ipairs(state.projects) do
+      local label = tostring(i) .. ". " .. p.name .. "##" .. p.id
+      if reaper.ImGui_Selectable(ctx, label) then open_project(p) end
+    end
+    reaper.ImGui_EndChild(ctx)
   end
-  reaper.ImGui_EndChild(ctx)
 end
 
 local function draw_project()
@@ -1106,13 +1109,14 @@ local function draw_project()
   if #state.stems == 0 then
     empty_state("No stems in this project yet.")
   else
-    reaper.ImGui_BeginChild(ctx, "stem_list", 0, 128)
-    for _, s in ipairs(state.stems) do
-      reaper.ImGui_TextWrapped(ctx, s.name)
-      reaper.ImGui_SameLine(ctx)
-      if reaper.ImGui_Button(ctx, "Import##" .. s.id) then import_stem(s) end
+    if reaper.ImGui_BeginChild(ctx, "stem_list", 0, 128) then
+      for _, s in ipairs(state.stems) do
+        reaper.ImGui_TextWrapped(ctx, s.name)
+        reaper.ImGui_SameLine(ctx)
+        if reaper.ImGui_Button(ctx, "Import##" .. s.id) then import_stem(s) end
+      end
+      reaper.ImGui_EndChild(ctx)
     end
-    reaper.ImGui_EndChild(ctx)
   end
 
   section_title("Push stem", "selected track")
@@ -1134,11 +1138,12 @@ local function draw_project()
   if #state.comments == 0 then
     empty_state("No comments yet.")
   else
-    reaper.ImGui_BeginChild(ctx, "comment_list", 0, 150)
-    for _, c in ipairs(state.comments) do
-      draw_comment_item(c)
+    if reaper.ImGui_BeginChild(ctx, "comment_list", 0, 150) then
+      for _, c in ipairs(state.comments) do
+        draw_comment_item(c)
+      end
+      reaper.ImGui_EndChild(ctx)
     end
-    reaper.ImGui_EndChild(ctx)
   end
   reaper.ImGui_SetNextItemWidth(ctx, content_width())
   changed, state.comment_body = reaper.ImGui_InputText(ctx, "New comment", state.comment_body)
