@@ -1,0 +1,46 @@
+# ERRORS — Take for Reaper
+
+Approaches that took more than 2 attempts. Check before retrying similar tasks.
+
+## 2026-06-08 — "No response from server" (http == 0) on macOS
+
+- **What didn't work:** The first curl fix resolved the executable by absolute
+  path **only on Windows** (`System32\curl.exe`). On macOS it fell through to
+  bare `curl`, which is exactly the case that was broken — so it changed nothing
+  for a Mac user and the error persisted.
+- **What worked:** Resolve curl by absolute path on **every** OS. Root cause was
+  REAPER inheriting an empty launchd PATH (`launchctl getenv PATH` empty), so
+  bare `curl` never launched. `/usr/bin/curl` exists on every Mac.
+- **Next time:** When a DAW/GUI-app shells out and gets "no output," suspect an
+  empty/over-trimmed PATH before suspecting the network. Test
+  `launchctl getenv PATH` and the endpoint with a direct `curl` first.
+
+## 2026-06-08 — Local typecheck passed, Vercel build failed
+
+- **What didn't work:** Trusting `pnpm typecheck` locally. It passed because the
+  working tree had an uncommitted fix and local `node_modules` differed from a
+  clean install.
+- **What worked:** Reading the Vercel build logs. The failure was a phantom
+  dependency — `@vercel/og` imported but never in `package.json`, so the clean
+  CI install couldn't find it. Fix was `next/og` (Next 16 built-in).
+- **Next time:** "Works locally, fails in CI" on a fresh deploy → suspect an
+  undeclared/phantom dependency or an uncommitted local fix. Diff committed HEAD
+  vs working tree.
+
+## 2026-06-08 — Don't trust a token field by what the user says
+
+- The user insisted the API token was swapped, but `take_resp.json` kept saying
+  `unauthorized`. The token field actually held an **invite URL**
+  (`https://takeaudio.com/invite/...`), not a `take_` token. Reading the live
+  request/response off disk settled it. When auth fails, inspect the literal
+  value being sent, not the user's description of it.
+
+## 2026-06-09 — ImGui_EndChild assertion: child_window->Flags & ImGuiWindowFlags_ChildWindow
+
+- **What didn't work:** Calling `reaper.ImGui_EndChild(ctx)` unconditionally after
+  `BeginChild`. When the parent window has zero available space, `BeginChild`
+  returns `false` and no child window is pushed — `EndChild` then asserts.
+- **What worked:** Guard with `if reaper.ImGui_BeginChild(...) then ... EndChild end`.
+  All 5 `BeginChild`/`EndChild` pairs in Take.lua needed the guard.
+- **Next time:** Every `BeginChild` in ReaImGui must have its `EndChild` inside
+  an `if` that checks the return value. This is the standard Dear ImGui pattern.
