@@ -1,5 +1,29 @@
 # LEARNINGS — Take for Reaper
 
+## 2026-06-09
+
+- **A ReaPack `<source>` must carry the absolute download URL as the element's
+  text content** — the canonical form `reapack-index` (and ReaTeam) emit:
+  `<source main="main">https://takeaudio.com/reaper/Take.lua</source>`. ReaPack
+  feeds whatever it resolves as the URL straight to curl. Two broken variants both
+  yield `Could not resolve host: <name>`: (a) a bare filename
+  `<source ...>Take.lua</source>` — curl treats `Take.lua` as a hostname; (b) the
+  URL stashed in a `file=` attribute with empty content
+  `<source file="https://.../Take.lua"/>` — empty URL, ReaPack falls back to the
+  bare package name. **The "could not resolve host" error is never DNS here** — it
+  means the index never produced a resolvable URL.
+
+- **This repo's index is mirrored in three places that drift:**
+  `take/apps/web/public/reaper/index.xml` (live, Vercel-served at
+  `takeaudio.com/reaper`), `take/apps/reaper/index.xml` (dev source), and
+  standalone `take-reaper/index.xml` (GitHub). Keep all three on the canonical
+  form. The one canonical install URL is `https://takeaudio.com/reaper/index.xml`;
+  both READMEs point there now.
+
+- **A stale ReaPack index survives a plain "Synchronize."** To force a fresh
+  fetch after fixing the index: ReaPack → Manage repositories → remove the repo →
+  re-import the URL → Synchronize.
+
 ## 2026-06-08
 
 - **REAPER's `ExecProcess` on macOS inherits an empty PATH.** When REAPER is

@@ -2,6 +2,21 @@
 
 Approaches that took more than 2 attempts. Check before retrying similar tasks.
 
+## 2026-06-09 — ReaPack "Could not resolve host: Take.lua" misread as DNS
+
+- **What didn't work:** Treating the error as a network/DNS problem. That led to
+  commit `a0a2ce6` moving ReaPack hosting off GitHub onto `takeaudio.com` ("to
+  avoid GitHub DNS issues") — pointless, the host was never the problem. Then
+  commit `5eac92c` rewrote `<source>` into a `file="<URL>"` attribute with empty
+  element content, which **kept** the exact same error.
+- **What worked:** Putting the absolute URL back as the `<source>` element's text
+  content (canonical `reapack-index` form). curl was choking on the bare filename
+  `Take.lua` as a hostname the whole time — the index never held a resolvable URL.
+- **Next time:** "Could not resolve host: <a filename>" from ReaPack/curl is a
+  malformed `<source>`, not DNS or the network. Check the `<source>` tag holds a
+  full `https://` URL as its text content before touching hosting. And remember
+  the index lives in three drifting copies — fix all three.
+
 ## 2026-06-08 — "No response from server" (http == 0) on macOS
 
 - **What didn't work:** The first curl fix resolved the executable by absolute
