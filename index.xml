@@ -8,55 +8,55 @@
       </metadata>
       <version name="0.6.1" author="Dead Pixel Design" time="2026-06-08T23:30:00Z">
         <changelog><![CDATA[Fix Connect not opening the browser on macOS: the file/URL opener is now resolved by absolute path (/usr/bin/open) like curl, so it launches under REAPER's empty PATH.]]></changelog>
-        <source main="main">Take.lua</source>
+        <source main="main">https://takeaudio.com/reaper/Take.lua</source>
       </version>
       <version name="0.6.0" author="Dead Pixel Design" time="2026-06-08T21:00:00Z">
         <changelog><![CDATA[One-click Connect: click Connect, approve Take in your browser, and the panel pairs itself — no API key to copy or paste (pasting a token by hand still works as a fallback). Also fixes "No response from server" on macOS/Linux: curl is now resolved by absolute path on every OS, not just Windows, so it launches even when REAPER inherits an empty PATH.]]></changelog>
-        <source main="main">Take.lua</source>
+        <source main="main">https://takeaudio.com/reaper/Take.lua</source>
       </version>
       <version name="0.5.5" author="Dead Pixel Design" time="2026-06-08T19:00:00Z">
         <changelog><![CDATA[Fix "No response from server": resolve curl by absolute path (unquoted, so cmd.exe can't mangle it) so it launches even when REAPER's environment lacks curl on PATH.]]></changelog>
-        <source main="main">Take.lua</source>
+        <source main="main">https://takeaudio.com/reaper/Take.lua</source>
       </version>
       <version name="0.5.4" author="Dead Pixel Design" time="2026-06-08T18:00:00Z">
         <changelog><![CDATA[Fix "No response from server": resolve curl by absolute path so it runs even when REAPER's environment lacks it on PATH.]]></changelog>
-        <source main="main">Take.lua</source>
+        <source main="main">https://takeaudio.com/reaper/Take.lua</source>
       </version>
       <version name="0.5.3" author="Dead Pixel Design" time="2026-06-08T16:00:00Z">
         <changelog><![CDATA[Switches the Reaper server to takeaudio.com and auto-repairs stale saved URLs.]]></changelog>
-        <source main="main">Take.lua</source>
+        <source main="main">https://takeaudio.com/reaper/Take.lua</source>
       </version>
       <version name="0.5.2" author="Dead Pixel Design" time="2026-06-08T15:00:00Z">
         <changelog><![CDATA[Clarifies the Server URL and API token fields in the Reaper settings panel.]]></changelog>
-        <source main="main">Take.lua</source>
+        <source main="main">https://takeaudio.com/reaper/Take.lua</source>
       </version>
       <version name="0.5.1" author="Dead Pixel Design" time="2026-06-08T14:00:00Z">
         <changelog><![CDATA[Hotfix: startup temp cleanup, ReaImGui child windows, and render/status handling.]]></changelog>
-        <source main="main">Take.lua</source>
+        <source main="main">https://takeaudio.com/reaper/Take.lua</source>
       </version>
       <version name="0.5.0" author="Dead Pixel Design" time="2026-05-26T12:00:00Z">
         <changelog><![CDATA[Session review: jump from comments to the edit cursor, drop Take markers, and open voice memos from the panel.]]></changelog>
-        <source main="main">Take.lua</source>
+        <source main="main">https://takeaudio.com/reaper/Take.lua</source>
       </version>
       <version name="0.4.0" author="Dead Pixel Design" time="2026-05-24T12:00:00Z">
         <changelog><![CDATA[Voice memos: record a spoken comment from the panel, pinned to the edit cursor on the current rough.]]></changelog>
-        <source main="main">Take.lua</source>
+        <source main="main">https://takeaudio.com/reaper/Take.lua</source>
       </version>
       <version name="0.3.0" author="Dead Pixel Design" time="2026-05-24T00:00:00Z">
         <changelog><![CDATA[Comments: read the project discussion in the panel and drop a comment pinned to the edit cursor on the current rough.]]></changelog>
-        <source main="main">Take.lua</source>
+        <source main="main">https://takeaudio.com/reaper/Take.lua</source>
       </version>
       <version name="0.2.1" author="Dead Pixel Design" time="2026-05-23T00:00:00Z">
         <changelog><![CDATA[Default server URL points at the live Take app.]]></changelog>
-        <source main="main">Take.lua</source>
+        <source main="main">https://takeaudio.com/reaper/Take.lua</source>
       </version>
       <version name="0.2.0" author="Dead Pixel Design" time="2026-05-22T00:00:00Z">
         <changelog><![CDATA[Push: render the selected track as a new stem, or render the master as a new rough.]]></changelog>
-        <source main="main">Take.lua</source>
+        <source main="main">https://takeaudio.com/reaper/Take.lua</source>
       </version>
       <version name="0.1.0" author="Dead Pixel Design" time="2026-05-21T00:00:00Z">
         <changelog><![CDATA[Token auth, project list, project detail, and pull stem into session.]]></changelog>
-        <source main="main">Take.lua</source>
+        <source main="main">https://takeaudio.com/reaper/Take.lua</source>
       </version>
     </reapack>
   </category>
