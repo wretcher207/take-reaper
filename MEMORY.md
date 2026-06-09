@@ -1,5 +1,24 @@
 # MEMORY — Take for Reaper (decision log)
 
+## 2026-06-09 — ReaPack "could not resolve host" was a malformed `<source>`, not DNS
+
+- **Root cause:** ReaPack index `<source>` must hold the absolute download URL as
+  the element's **text content** (canonical `reapack-index` form):
+  `<source main="main">https://takeaudio.com/reaper/Take.lua</source>`. Two broken
+  variants we shipped both produced `Could not resolve host: Take.lua`: (a) bare
+  filename `<source ...>Take.lua</source>` — curl gets `Take.lua` as a URL; (b)
+  URL in a `file=` attr with empty content `<source file="https://.../Take.lua"/>`
+  (commit 5eac92c) — empty download URL, ReaPack falls back to the bare package
+  name.
+- **False trail:** Earlier this was misdiagnosed as "GitHub DNS issues" — commit
+  a0a2ce6 moved hosting off GitHub to takeaudio.com for nothing. It was never DNS.
+- **Decided:** Fixed all THREE drifting copies to canonical form
+  (`take/apps/web/public/reaper`, `take/apps/reaper`, standalone `take-reaper`).
+  Canonical install URL is `https://takeaudio.com/reaper/index.xml`; both READMEs
+  now point there (was split GitHub-raw vs takeaudio).
+- **Recovery note:** A stale cached index in REAPER survives plain Synchronize —
+  remove the Take repo in ReaPack and re-import the URL to force a fresh fetch.
+
 ## 2026-06-09 — Session workflow: auto-wrap-up + push-by-default
 
 - **Decided:** At the end of every session, automatically run the session-wrap
