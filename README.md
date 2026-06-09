@@ -73,7 +73,7 @@ Make sure your mic is on Reaper's first audio input.
 Requires the **ReaImGui** extension. Install it via ReaPack from the default ReaTeam repository if you don't have it.
 
 1. Reaper > Extensions > ReaPack > Import repositories
-2. Paste this URL: `https://raw.githubusercontent.com/wretcher207/take-reaper/main/index.xml`
+2. Paste this URL: `https://takeaudio.com/reaper/index.xml`
 3. Install **Take.lua** from the "Take" category
 4. Bind it to a keyboard shortcut or find it in the Actions list
 
