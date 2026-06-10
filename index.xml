@@ -6,6 +6,10 @@
         <description><![CDATA[Take — the layer between your DAW and the people you make music with.]]></description>
         <link rel="website">https://takeaudio.com</link>
       </metadata>
+      <version name="0.6.4" author="Dead Pixel Design" time="2026-06-10T20:00:00Z">
+        <changelog><![CDATA[Launch hardening: JSON null values can no longer shift items out of the project/stem/comment lists; Connect fails fast with a clear message when the pairing is unknown instead of silently waiting out the 10-minute timeout; "couldn't reach the server" and "curl couldn't run" are now told apart; render temp folders use a properly seeded random suffix; the recording status says it captures REAPER input 1; informational notes (like "No paid projects") no longer render in the error color.]]></changelog>
+        <source main="main">https://takeaudio.com/reaper/Take.lua</source>
+      </version>
       <version name="0.6.3" author="Dead Pixel Design" time="2026-06-09T18:30:00Z">
         <changelog><![CDATA[Comments now display instantly with full author/timestamp from the server response, auto-scroll to the new comment after posting, and warn when a timestamped comment had to fall back to a project note because there is no current rough. Also clears stale comments when switching projects.]]></changelog>
         <source main="main">https://takeaudio.com/reaper/Take.lua</source>

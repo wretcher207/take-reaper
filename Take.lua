@@ -1,5 +1,5 @@
 -- @description Take for Reaper
--- @version 0.6.3
+-- @version 0.6.4
 -- @author Dead Pixel Design
 -- @about
 --   A docked panel that connects this Reaper session to your Take projects.
@@ -22,6 +22,10 @@ end
 local EXT = "TAKE"
 local DEFAULT_BASE_URL = "https://takeaudio.com"
 local ctx = reaper.ImGui_CreateContext("Take")
+
+-- Seed math.random (render temp-dir suffixes). Unseeded Lua repeats the same
+-- sequence every REAPER launch, so two same-second pushes could collide.
+math.randomseed(os.time())
 
 local function trim(s)
   return tostring(s or ""):match("^%s*(.-)%s*$")
@@ -132,7 +136,11 @@ local function json_decode(s)
     if s:sub(i, i) == "]" then i = i + 1; return arr end
     while i <= n do
       skip_ws()
-      arr[#arr + 1] = parse_value()
+      -- JSON null decodes to Lua nil; storing nil would leave a hole that
+      -- breaks #arr and stops every ipairs consumer early, so skip nulls and
+      -- keep the array contiguous.
+      local v = parse_value()
+      if v ~= nil then arr[#arr + 1] = v end
       skip_ws()
       local c = s:sub(i, i)
       i = i + 1
@@ -317,9 +325,11 @@ cleanup_stale_temps()
 
 -- Pull the http status code out of ExecProcess's "<exitcode>\n<stdout>".
 -- curl -w "%{http_code}" writes exactly three digits to stdout; anchor on that
--- so stray numbers in error text don't produce a false match.
+-- so stray numbers in error text don't produce a false match. Returns -1 when
+-- ExecProcess gave no output at all (curl never launched) — distinct from
+-- curl's "000" (curl ran but couldn't connect), which parses to 0.
 local function status_from(out)
-  out = out or ""
+  if not out or out == "" then return -1 end
   local code = out:match("\n(%d%d%d)\n*$")
   return tonumber(code) or 0
 end
@@ -445,8 +455,12 @@ local function load_projects()
   if state.token == "" then state.status = "Add a token in Settings first."; return end
   state.status = "Loading projects…"
   local http, body = http_get_json("/api/reaper/projects")
-  if http == 0 then
+  if http == -1 then
     state.status = "No response — curl couldn't run from REAPER. Restart REAPER; if it persists, update Take in ReaPack."
+    return
+  end
+  if http == 0 then
+    state.status = "Couldn't reach the server. Check the Server URL in Settings and your internet connection."
     return
   end
   if http == 401 then
@@ -705,7 +719,7 @@ local function start_voice_record()
 
   state.voice = v
   state.recording = true
-  state.status = "Recording… speak, then Stop & post."
+  state.status = "Recording (REAPER input 1)… speak, then Stop and post."
 end
 
 local function stop_and_post_voice()
@@ -988,10 +1002,14 @@ local function draw_status()
   if state.status == "" then return end
   local color = COLORS.muted
   local lowered = state.status:lower()
+  -- Failure phrases only — a bare "no " would also flag friendly notes like
+  -- "No paid projects" or "No timeline comments to mark" as errors.
   if lowered:find("failed") or lowered:find("couldn't") or lowered:find("rejected")
-      or lowered:find("check") or lowered:find("no ") then
+      or lowered:find("check") or lowered:find("timed out") or lowered:find("not accepted")
+      or lowered:find("url returned") or lowered:find("isn't on a paid plan") then
     color = COLORS.danger
-  elseif lowered:find("posted") or lowered:find("pushed") or lowered:find("imported") then
+  elseif lowered:find("posted") or lowered:find("pushed") or lowered:find("imported")
+      or lowered:find("connected") then
     color = COLORS.success
   end
 
@@ -1008,8 +1026,12 @@ end
 local function start_pairing()
   state.pairing = nil
   local http, body = http_post_json("/api/reaper/pair/start", {})
-  if http == 0 then
+  if http == -1 then
     state.status = "No response — curl couldn't run from REAPER. Restart REAPER; if it persists, update Take in ReaPack."
+    return
+  end
+  if http == 0 then
+    state.status = "Couldn't reach the server. Check the Server URL in Settings and your internet connection."
     return
   end
   if http ~= 200 then
@@ -1045,6 +1067,13 @@ local function poll_pairing()
   p.next_poll = now + 2
 
   local http, body = http_get_json("/api/reaper/pair/poll?device_code=" .. p.device_code)
+  if http == 404 then
+    -- The server doesn't know this pairing (expired and cleaned up, or a stale
+    -- device code). Waiting longer can't fix it — fail now, not at the deadline.
+    state.pairing = nil
+    state.status = "Connect failed (not-found). Open Settings and try again."
+    return
+  end
   if http ~= 200 then return end -- transient; keep waiting until the deadline
   local ok, data = pcall(json_decode, body)
   if not ok or type(data) ~= "table" then return end
