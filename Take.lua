@@ -68,6 +68,8 @@ local MIME = {
 -- --------------------------------------------------------------------------
 -- Minimal JSON decoder (objects, arrays, strings, numbers, bool, null).
 -- --------------------------------------------------------------------------
+local JSON_NULL = {} -- sentinel for JSON null; distinct from Lua nil to keep arrays dense
+
 local function json_decode(s)
   local i, n = 1, #s
   local parse_value
@@ -122,7 +124,7 @@ local function json_decode(s)
   local function parse_literal()
     if s:sub(i, i + 3) == "true" then i = i + 4; return true end
     if s:sub(i, i + 4) == "false" then i = i + 5; return false end
-    if s:sub(i, i + 3) == "null" then i = i + 4; return nil end
+    if s:sub(i, i + 3) == "null" then i = i + 4; return JSON_NULL end
     local num = s:match("^%-?%d+%.?%d*[eE]?[%+%-]?%d*", i)
     if num then i = i + #num; return tonumber(num) end
     i = i + 1
@@ -134,13 +136,11 @@ local function json_decode(s)
     i = i + 1
     skip_ws()
     if s:sub(i, i) == "]" then i = i + 1; return arr end
+    local idx = 0
     while i <= n do
       skip_ws()
-      -- JSON null decodes to Lua nil; storing nil would leave a hole that
-      -- breaks #arr and stops every ipairs consumer early, so skip nulls and
-      -- keep the array contiguous.
-      local v = parse_value()
-      if v ~= nil then arr[#arr + 1] = v end
+      idx = idx + 1
+      arr[idx] = parse_value()
       skip_ws()
       local c = s:sub(i, i)
       i = i + 1
@@ -187,6 +187,7 @@ end
 -- Minimal JSON encoder (strings, integers, booleans, arrays, flat objects).
 -- --------------------------------------------------------------------------
 local function json_encode(v)
+  if v == JSON_NULL then return "null" end
   local t = type(v)
   if v == nil then
     return "null"
