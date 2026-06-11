@@ -57,3 +57,16 @@
   tool. **Caveat:** this may not record the file version `20260608210000` in the
   remote migration history. If `supabase db push` is run later, repair with
   `supabase migration repair --status applied 20260608210000`.
+
+## 2026-06-11 — 0.6.7: EndChild fix + sync
+
+- **ReaImGui 0.9+ asserts if `EndChild` is skipped when `BeginChild` returns false.** The `if BeginChild then ... EndChild end` pattern (added in 0.5.1 for older ReaImGui) now triggers `ImGui_EndChild assert (:NNN)` when a child has no visible area. Fixed in 0.6.7 by unconditionally calling `EndChild` — content still only renders when `BeginChild` is true.
+- **All three copies now at 0.6.7**: `take/apps/reaper`, `take/apps/web/public/reaper`, `take-reaper`. Verified byte-identical via md5. takeaudio.com deployed.
+
+## 2026-06-11 — Audited, fixes deferred
+
+- Full audit of Take.lua v0.6.4 + publish pipeline; API contract vs web app
+  verified clean, all three Take.lua/index.xml copies byte-identical.
+- Report lives in the take repo: `AUDIT-2026-06-11.md`. Top fixes for this
+  repo: `jval()` JSON-null guard, parameterized publish script that copies
+  into the web app, async curl, render-temp-dir cleanup, `reaper.atexit`.
