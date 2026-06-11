@@ -1,5 +1,5 @@
 -- @description Take for Reaper
--- @version 0.6.5
+-- @version 0.6.7
 -- @author Dead Pixel Design
 -- @about
 --   A docked panel that connects this Reaper session to your Take projects.
@@ -48,6 +48,7 @@ local state = {
   voice = nil, -- in-flight voice-memo record state (temp track, saved arm, cursor)
   pairing = nil, -- in-flight one-click Connect (device_code, deadline, next_poll)
   scroll_comments = false, -- set after post_comment to auto-scroll to bottom
+  job = nil, -- in-flight async network job (a coroutine pumped by loop())
 }
 if state.base_url == ""
     or state.base_url == "https://take-ebon.vercel.app"
@@ -314,6 +315,24 @@ local function safe_remove(path)
   if path and path ~= "" then pcall(os.remove, path) end
 end
 
+local IS_WIN = (reaper.GetOS() or ""):find("Win") ~= nil
+
+local function file_exists(path)
+  local f = io.open(path, "rb")
+  if f then f:close(); return true end
+  return false
+end
+
+local function write_file(path, data)
+  local f = io.open(path, "wb")
+  if not f then return false end
+  f:write(data); f:close()
+  return true
+end
+
+-- Single-quote a string so it survives as one argument to `sh -c`.
+local function shq(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
+
 -- Remove a directory and everything in it. Used for the per-render temp dirs
 -- (take_render_*), which hold the rendered file plus .reapeaks sidecars and any
 -- secondary-format outputs. EnumerateFiles lists files only, so collect them all
@@ -340,7 +359,7 @@ end
 -- during the current session. Also catches curl resp/req JSON bodies.
 local function cleanup_stale_temps()
   local base = reaper.GetResourcePath() .. "/Scripts/"
-  local prefixes = { "take_render_", "take_voice_", "take_resp.json", "take_req.json", "take_upload_resp.txt" }
+  local prefixes = { "take_render_", "take_voice_", "take_resp.json", "take_req.json", "take_upload_resp.txt", "take_job_" }
   for _, prefix in ipairs(prefixes) do
     local i = 0
     while true do
@@ -377,6 +396,81 @@ local function status_from(out)
   return tonumber(code) or 0
 end
 
+-- Run a curl command and return its http status. Dual-mode:
+--   * On the main thread (button handlers, loop, pairing) it blocks via
+--     ExecProcess exactly as before — quick GETs stay dead-simple.
+--   * Inside a job coroutine it spawns curl DETACHED so REAPER's UI keeps
+--     painting, then yields each frame until the command finishes. Detaching
+--     is what fixes #7: a blocking ExecProcess froze the panel for the whole
+--     upload (minutes on a slow line); detached it returns in ~ms.
+-- Every caller passes `-o <file> -w "%{http_code}"`, so curl's stdout is just
+-- the 3-digit code. Sync mode reads it out of ExecProcess's "<exit>\n<code>";
+-- async mode redirects that stdout into a file and reads it back when done.
+local JOB_SEQ = 0
+local function http_run(cmd, timeout_ms)
+  local co, ismain = coroutine.running()
+  if not co or ismain then
+    return status_from(reaper.ExecProcess(cmd, timeout_ms))
+  end
+
+  JOB_SEQ = JOB_SEQ + 1
+  local jid = os.time() .. "_" .. JOB_SEQ
+  local code_tmp = tmp_path("job_" .. jid .. ".code")
+  local done = tmp_path("job_" .. jid .. ".done")
+  local script
+  if IS_WIN then
+    -- In a .bat a literal % must be doubled, so curl's "%{http_code}" needs
+    -- escaping that the command-line (sync) path doesn't. The atomic rename
+    -- (move) is the completion signal: `done` only appears once curl finished.
+    script = tmp_path("job_" .. jid .. ".bat")
+    write_file(script,
+      "@echo off\r\n" ..
+      cmd:gsub("%%", "%%%%") .. " > " .. q(code_tmp) .. " 2>nul\r\n" ..
+      "move /y " .. q(code_tmp) .. " " .. q(done) .. " >nul 2>nul\r\n")
+    reaper.ExecProcess('cmd /c start "" /b cmd /c ' .. q(script), 10)
+  else
+    script = tmp_path("job_" .. jid .. ".sh")
+    write_file(script,
+      "#!/bin/sh\n" ..
+      cmd .. " > " .. q(code_tmp) .. " 2>/dev/null\n" ..
+      "mv " .. q(code_tmp) .. " " .. q(done) .. "\n")
+    -- The trailing `&` (inside sh -c) is what actually detaches; without the
+    -- stdio redirects ExecProcess still waits on the pipe and we gain nothing.
+    reaper.ExecProcess("/bin/sh -c " ..
+      shq("/bin/sh " .. q(script) .. " </dev/null >/dev/null 2>&1 &"), 10)
+  end
+
+  -- curl's own --max-time sits just under timeout_ms, so it self-terminates and
+  -- still writes a code ("000"); the grace covers defer scheduling. If `done`
+  -- never lands, the script never launched -> treat as "no response" (-1).
+  local deadline = reaper.time_precise() + (timeout_ms / 1000) + 5
+  while not file_exists(done) do
+    if reaper.time_precise() > deadline then
+      safe_remove(script); safe_remove(code_tmp)
+      return -1
+    end
+    coroutine.yield()
+  end
+
+  local code = read_file(done) or ""
+  safe_remove(script); safe_remove(done)
+  if code == "" then return -1 end
+  return tonumber(code:match("%d%d%d")) or 0
+end
+
+-- Start an async network job. Body runs as a coroutine pumped by loop(): it
+-- executes synchronously until the first http_run, then yields while curl runs
+-- detached. One job at a time — the panel drives a single operation anyway, and
+-- the fixed resp/req temp filenames are only safe because jobs are serial.
+local function start_job(body)
+  if state.job then
+    state.status = "Busy — finish the current operation first."
+    return false
+  end
+  state.job = coroutine.create(body)
+  return true
+end
+
 -- curl --connect-timeout/--max-time sit just under each ExecProcess timeout so
 -- curl exits on its own (writing http_code "000" -> status 0 -> "couldn't reach
 -- the server") instead of ExecProcess returning nil (status -1 -> the wrong
@@ -389,7 +483,7 @@ local function http_get_json(path)
     .. " -o " .. q(out_file)
     .. " -w " .. q("%{http_code}")
     .. " " .. q(url)
-  local http = status_from(reaper.ExecProcess(cmd, 20000))
+  local http = http_run(cmd, 20000)
   return http, read_file(out_file) or ""
 end
 
@@ -409,7 +503,7 @@ local function http_post_json(path, tbl)
     .. " -o " .. q(out_file)
     .. " -w " .. q("%{http_code}")
     .. " " .. q(url)
-  local http = status_from(reaper.ExecProcess(cmd, 60000))
+  local http = http_run(cmd, 60000)
   return http, read_file(out_file) or ""
 end
 
@@ -417,7 +511,7 @@ end
 local function http_download(url, dest)
   local cmd = curl_bin() .. " -s --connect-timeout 10 --max-time 110 -L -o " .. q(dest)
     .. " -w " .. q("%{http_code}") .. " " .. q(url)
-  return status_from(reaper.ExecProcess(cmd, 120000))
+  return http_run(cmd, 120000)
 end
 
 -- PUT a file to a (pre-signed) upload URL, streamed. Returns http_status.
@@ -430,7 +524,7 @@ local function http_upload(url, filepath, content_type)
     .. " -o " .. q(out_file)
     .. " -w " .. q("%{http_code}")
     .. " " .. q(url)
-  return status_from(reaper.ExecProcess(cmd, 300000))
+  return http_run(cmd, 300000)
 end
 
 -- --------------------------------------------------------------------------
@@ -738,19 +832,21 @@ local function open_voice_memo(c)
   if not c.id then state.status = "Voice memo is missing a comment id."; return end
 
   state.status = "Opening voice memo..."
-  local http, body = http_get_json("/api/reaper/projects/" .. state.project.id .. "/voice/" .. c.id)
-  if http == 401 then state.status = "Token rejected. Check it in Settings."; return end
-  if http == 403 then state.status = "This project's owner isn't on a paid plan."; return end
-  if http ~= 200 then state.status = "Couldn't open voice memo (" .. http .. ")."; return end
-  local data = json_decode(body)
-  if not data or not data.url then state.status = "No voice memo URL returned."; return end
+  start_job(function()
+    local http, body = http_get_json("/api/reaper/projects/" .. state.project.id .. "/voice/" .. c.id)
+    if http == 401 then state.status = "Token rejected. Check it in Settings."; return end
+    if http == 403 then state.status = "This project's owner isn't on a paid plan."; return end
+    if http ~= 200 then state.status = "Couldn't open voice memo (" .. http .. ")."; return end
+    local data = json_decode(body)
+    if not data or not data.url then state.status = "No voice memo URL returned."; return end
 
-  local filename = tostring(data.filename or ("voice_" .. comment_key(c) .. ".wav")):gsub("[/\\]", "_")
-  local dest = tmp_path("voice_" .. filename)
-  local dl = http_download(data.url, dest)
-  if dl ~= 200 then state.status = "Voice memo download failed (" .. dl .. ")."; return end
-  open_file(dest)
-  state.status = "Opened voice memo."
+    local filename = tostring(data.filename or ("voice_" .. comment_key(c) .. ".wav")):gsub("[/\\]", "_")
+    local dest = tmp_path("voice_" .. filename)
+    local dl = http_download(data.url, dest)
+    if dl ~= 200 then state.status = "Voice memo download failed (" .. dl .. ")."; return end
+    open_file(dest)
+    state.status = "Opened voice memo."
+  end)
 end
 
 -- Record from the default audio input onto a throwaway track placed past the end
@@ -842,60 +938,59 @@ local function stop_and_post_voice()
 
   local ext = (file:match("%.([^.]+)$") or "wav"):lower()
   state.status = "Uploading voice memo…"
-  if post_voice_memo(file, ext, timestamp_ms) then
-    safe_remove(file)
-  end
+  start_job(function()
+    if post_voice_memo(file, ext, timestamp_ms) then
+      safe_remove(file)
+    end
+  end)
 end
 
 local function import_stem(stem)
   state.status = "Pulling " .. stem.name .. "…"
-  local http, body = http_get_json("/api/reaper/stems/" .. stem.id .. "/original")
-  if http == 403 then state.status = "This project's owner isn't on a paid plan."; return end
-  if http ~= 200 then state.status = "Couldn't pull stem (" .. http .. ")."; return end
-  local data = json_decode(body)
-  if not data or not data.url then state.status = "No download URL returned."; return end
+  start_job(function()
+    local http, body = http_get_json("/api/reaper/stems/" .. stem.id .. "/original")
+    if http == 403 then state.status = "This project's owner isn't on a paid plan."; return end
+    if http ~= 200 then state.status = "Couldn't pull stem (" .. http .. ")."; return end
+    local data = json_decode(body)
+    if not data or not data.url then state.status = "No download URL returned."; return end
 
-  -- Prefix with the stem id so imports never collide by filename across
-  -- projects, and re-importing never reuses a path the project still holds open
-  -- (the Windows failure case). #15.
-  local safe_name = (data.filename or (stem.name .. ".wav")):gsub("[/\\]", "_")
-  local dest = tmp_path(stem.id .. "_" .. safe_name)
-  local dl = http_download(data.url, dest)
-  if dl ~= 200 then state.status = "Download failed (" .. dl .. ")."; return end
+    -- Prefix with the stem id so imports never collide by filename across
+    -- projects, and re-importing never reuses a path the project still holds open
+    -- (the Windows failure case). #15.
+    local safe_name = (data.filename or (stem.name .. ".wav")):gsub("[/\\]", "_")
+    local dest = tmp_path(stem.id .. "_" .. safe_name)
+    local dl = http_download(data.url, dest)
+    if dl ~= 200 then state.status = "Download failed (" .. dl .. ")."; return end
 
-  local idx = reaper.CountTracks(0)
-  reaper.InsertTrackAtIndex(idx, true)
-  local track = reaper.GetTrack(0, idx)
-  reaper.GetSetMediaTrackInfo_String(track, "P_NAME", stem.name, true)
-  reaper.SetOnlyTrackSelected(track)
+    -- The download yielded across frames; the track ops below run synchronously
+    -- in this resume, on the main thread, so REAPER calls are safe here.
+    local idx = reaper.CountTracks(0)
+    reaper.InsertTrackAtIndex(idx, true)
+    local track = reaper.GetTrack(0, idx)
+    reaper.GetSetMediaTrackInfo_String(track, "P_NAME", stem.name, true)
+    reaper.SetOnlyTrackSelected(track)
 
-  -- Save + restore the edit cursor around the insert so a pull doesn't move the
-  -- user's playhead (the voice-record path restores it too). #28.
-  local saved_cursor = reaper.GetCursorPosition()
-  local offset_ms = jval(data.timecode_offset_ms) or jval(stem.timecode_offset_ms) or 0
-  reaper.SetEditCurPos((offset_ms or 0) / 1000, false, false)
-  reaper.InsertMedia(dest, 0) -- 0 = add to currently selected track at edit cursor
-  reaper.SetEditCurPos(saved_cursor, false, false)
-  reaper.UpdateArrange()
-  state.status = "Imported " .. stem.name .. "."
+    -- Save + restore the edit cursor around the insert so a pull doesn't move the
+    -- user's playhead (the voice-record path restores it too). #28.
+    local saved_cursor = reaper.GetCursorPosition()
+    local offset_ms = jval(data.timecode_offset_ms) or jval(stem.timecode_offset_ms) or 0
+    reaper.SetEditCurPos((offset_ms or 0) / 1000, false, false)
+    reaper.InsertMedia(dest, 0) -- 0 = add to currently selected track at edit cursor
+    reaper.SetEditCurPos(saved_cursor, false, false)
+    reaper.UpdateArrange()
+    state.status = "Imported " .. stem.name .. "."
+  end)
 end
 
--- Shared push: render -> request signed URL -> upload -> finalize.
--- kind: "stem" | "rough". on_done() runs after a successful push.
-local function do_push(kind, render_settings, pattern, name, extra, on_done)
-  if not state.project then state.status = "Open a project first."; return end
-  if state.token == "" then state.status = "Add a token in Settings first."; return end
-
-  local function fail_after_render(file, message)
+-- Network half of a push: request signed URL -> upload -> finalize. Runs inside
+-- a job coroutine (each http_* call yields while curl runs detached), so the
+-- render must already be done and `file` is the rendered path. on_done() runs
+-- after a successful push. The render half lives in the callers because it
+-- touches REAPER state (solo) that must be restored before we yield.
+local function upload_and_finalize(kind, file, ext, name, extra, on_done)
+  local function fail(message)
     cleanup_render(file)
     state.status = message
-    return false
-  end
-
-  state.status = "Rendering…"
-  local file, ext = render_to_temp(render_settings, pattern)
-  if not file then
-    state.status = "Render didn't produce an accepted file. Check your render format — WAV, AIFF, FLAC, or MP3."
     return false
   end
 
@@ -906,22 +1001,22 @@ local function do_push(kind, render_settings, pattern, name, extra, on_done)
     sizeBytes = file_size(file),
     mimeType = MIME[ext],
   })
-  if req_http == 401 then return fail_after_render(file, "Token rejected. Check it in Settings.") end
-  if req_http == 403 then return fail_after_render(file, "This project's owner isn't on a paid plan.") end
-  if req_http ~= 200 then return fail_after_render(file, "Push request failed (" .. req_http .. ").") end
+  if req_http == 401 then return fail("Token rejected. Check it in Settings.") end
+  if req_http == 403 then return fail("This project's owner isn't on a paid plan.") end
+  if req_http ~= 200 then return fail("Push request failed (" .. req_http .. ").") end
   local req = json_decode(req_body)
-  if not req or not req.signedUrl then return fail_after_render(file, "No upload URL returned.") end
+  if not req or not req.signedUrl then return fail("No upload URL returned.") end
 
   local up = http_upload(req.signedUrl, file, MIME[ext])
-  if up ~= 200 then return fail_after_render(file, "Upload failed (" .. up .. ").") end
+  if up ~= 200 then return fail("Upload failed (" .. up .. ").") end
 
   local body = { projectId = state.project.id, path = req.path }
   body[kind == "stem" and "stemId" or "roughId"] = (kind == "stem") and req.stemId or req.roughId
   for k, v in pairs(extra or {}) do body[k] = v end
 
   local fin_http = select(1, http_post_json("/api/reaper/push/" .. kind .. "/finalize", body))
-  if fin_http == 403 then return fail_after_render(file, "This project's owner isn't on a paid plan.") end
-  if fin_http ~= 200 then return fail_after_render(file, "Finalize failed (" .. fin_http .. ").") end
+  if fin_http == 403 then return fail("This project's owner isn't on a paid plan.") end
+  if fin_http ~= 200 then return fail("Finalize failed (" .. fin_http .. ").") end
 
   cleanup_render(file)
   if on_done then on_done() end
@@ -929,6 +1024,9 @@ local function do_push(kind, render_settings, pattern, name, extra, on_done)
 end
 
 local function push_stem()
+  if state.job then state.status = "Busy — finish the current operation first."; return end
+  if not state.project then state.status = "Open a project first."; return end
+  if state.token == "" then state.status = "Add a token in Settings first."; return end
   local track = reaper.GetSelectedTrack(0, 0)
   if not track then state.status = "Select a track to push first."; return end
   local _, track_name = reaper.GetSetMediaTrackInfo_String(track, "P_NAME", "", false)
@@ -939,6 +1037,8 @@ local function push_stem()
   -- reliable one-file path). REAPER's "stems" render mode is media/selection
   -- dependent and can produce nothing. Save every track's solo state, solo only
   -- this one for the render, then restore — so the session is left untouched.
+  -- Render + solo restore run synchronously up front (REAPER state must be put
+  -- back before the job yields); only the upload is async.
   local count = reaper.CountTracks(0)
   local saved_solo = {}
   for i = 0, count - 1 do
@@ -947,9 +1047,10 @@ local function push_stem()
     reaper.SetMediaTrackInfo_Value(t, "I_SOLO", (t == track) and 1 or 0)
   end
 
-  local pushed = false
+  state.status = "Rendering…"
+  local file, ext
   local ok, err = pcall(function()
-    pushed = do_push("stem", 0, "take_stem", name, { name = name, timecodeOffsetMs = 0 })
+    file, ext = render_to_temp(0, "take_stem")
   end)
 
   for i = 0, count - 1 do
@@ -961,21 +1062,40 @@ local function push_stem()
     state.status = "Push failed: " .. tostring(err)
     return
   end
-  if pushed then
-    open_project(state.project) -- refresh the stem list
-    state.status = "Pushed stem: " .. name .. "."
+  if not file then
+    state.status = "Render didn't produce an accepted file. Check your render format — WAV, AIFF, FLAC, or MP3."
+    return
   end
+
+  start_job(function()
+    if upload_and_finalize("stem", file, ext, name, { name = name, timecodeOffsetMs = 0 }) then
+      open_project(state.project) -- refresh the stem list
+      state.status = "Pushed stem: " .. name .. "."
+    end
+  end)
 end
 
 local function push_rough()
+  if state.job then state.status = "Busy — finish the current operation first."; return end
+  if not state.project then state.status = "Open a project first."; return end
+  if state.token == "" then state.status = "Add a token in Settings first."; return end
   local label = state.push_name ~= "" and state.push_name or nil
   local stem_ids = {}
   for _, s in ipairs(state.stems) do stem_ids[#stem_ids + 1] = s.id end
   local extra = { activeStemIds = stem_ids, timecodeOffsetMs = 0 }
   if label then extra.label = label end
 
-  do_push("rough", 0, "take_rough", label or "rough", extra, function()
-    state.status = "Pushed a new rough." .. (label and (" (" .. label .. ")") or "")
+  state.status = "Rendering…"
+  local file, ext = render_to_temp(0, "take_rough")
+  if not file then
+    state.status = "Render didn't produce an accepted file. Check your render format — WAV, AIFF, FLAC, or MP3."
+    return
+  end
+
+  start_job(function()
+    upload_and_finalize("rough", file, ext, label or "rough", extra, function()
+      state.status = "Pushed a new rough." .. (label and (" (" .. label .. ")") or "")
+    end)
   end)
 end
 
@@ -1045,8 +1165,8 @@ end
 local function empty_state(text)
   if reaper.ImGui_BeginChild(ctx, "empty_" .. text, 0, 48) then
     muted_text(text)
-    reaper.ImGui_EndChild(ctx)
   end
+  reaper.ImGui_EndChild(ctx)
 end
 
 local function primary_button(label, width)
@@ -1105,8 +1225,8 @@ local function draw_status()
   reaper.ImGui_Spacing(ctx)
   if reaper.ImGui_BeginChild(ctx, "status", 0, 44) then
     reaper.ImGui_TextColored(ctx, color, state.status)
-    reaper.ImGui_EndChild(ctx)
   end
+  reaper.ImGui_EndChild(ctx)
 end
 
 -- One-click Connect (the OAuth device grant). Ask the server for a pairing, open
@@ -1235,8 +1355,8 @@ local function draw_projects()
       local label = tostring(i) .. ". " .. p.name .. "##" .. p.id
       if reaper.ImGui_Selectable(ctx, label) then open_project(p) end
     end
-    reaper.ImGui_EndChild(ctx)
   end
+  reaper.ImGui_EndChild(ctx)
 end
 
 local function draw_project()
@@ -1255,8 +1375,8 @@ local function draw_project()
         reaper.ImGui_SameLine(ctx)
         if reaper.ImGui_Button(ctx, "Import##" .. s.id) then import_stem(s) end
       end
-      reaper.ImGui_EndChild(ctx)
     end
+    reaper.ImGui_EndChild(ctx)
   end
 
   section_title("Push stem", "selected track")
@@ -1286,8 +1406,8 @@ local function draw_project()
         reaper.ImGui_SetScrollHereY(ctx, 1.0)
         state.scroll_comments = false
       end
-      reaper.ImGui_EndChild(ctx)
     end
+    reaper.ImGui_EndChild(ctx)
   end
   reaper.ImGui_SetNextItemWidth(ctx, content_width())
   changed, state.comment_body = reaper.ImGui_InputText(ctx, "New comment", state.comment_body)
@@ -1304,6 +1424,18 @@ end
 
 local function loop()
   push_theme()
+  -- Pump the in-flight async network job one slice per frame. The body runs
+  -- until its next http_run yields (curl running detached), so the UI keeps
+  -- painting; a resume that errors or finishes clears the slot. (#7)
+  if state.job then
+    local ok, err = coroutine.resume(state.job)
+    if not ok then
+      state.status = "Operation failed: " .. tostring(err)
+      state.job = nil
+    elseif coroutine.status(state.job) == "dead" then
+      state.job = nil
+    end
+  end
   if state.pairing then poll_pairing() end
   reaper.ImGui_SetNextWindowSize(ctx, 450, 700, reaper.ImGui_Cond_FirstUseEver())
   reaper.ImGui_SetNextWindowSizeConstraints(ctx, 360, 480, -1, -1)
