@@ -1,5 +1,5 @@
 -- @description Take for Reaper
--- @version 0.6.4
+-- @version 0.6.5
 -- @author Dead Pixel Design
 -- @about
 --   A docked panel that connects this Reaper session to your Take projects.
@@ -69,6 +69,16 @@ local MIME = {
 -- Minimal JSON decoder (objects, arrays, strings, numbers, bool, null).
 -- --------------------------------------------------------------------------
 local JSON_NULL = {} -- sentinel for JSON null; distinct from Lua nil to keep arrays dense
+
+-- Server JSON nulls decode to JSON_NULL (a truthy table), so `x or default`
+-- fallbacks and `if x then` guards on object fields silently keep the null and
+-- can do arithmetic on a table → ReaScript error. Route every server-provided
+-- field that feeds an `or`-default, a truthiness check, or arithmetic through
+-- jval() to collapse the sentinel back to Lua nil at the point of use.
+local function jval(v)
+  if v == JSON_NULL then return nil end
+  return v
+end
 
 local function json_decode(s)
   local i, n = 1, #s
@@ -304,6 +314,27 @@ local function safe_remove(path)
   if path and path ~= "" then pcall(os.remove, path) end
 end
 
+-- Remove a directory and everything in it. Used for the per-render temp dirs
+-- (take_render_*), which hold the rendered file plus .reapeaks sidecars and any
+-- secondary-format outputs. EnumerateFiles lists files only, so collect them all
+-- (don't remove mid-enumeration, which can skip entries) then drop the dir. Lua's
+-- os.remove can't rmdir on Windows, so fall back to the OS rmdir there.
+local function remove_dir(dir)
+  if not dir or dir == "" then return end
+  local names = {}
+  local i = 0
+  while true do
+    local fn = reaper.EnumerateFiles(dir, i)
+    if not fn then break end
+    names[#names + 1] = fn
+    i = i + 1
+  end
+  for _, fn in ipairs(names) do pcall(os.remove, dir .. "/" .. fn) end
+  if not os.remove(dir) and (reaper.GetOS() or ""):find("Win") then
+    reaper.ExecProcess('cmd /c rmdir ' .. q(dir:gsub("/", "\\")), 2000)
+  end
+end
+
 -- Clean up stale temp files from previous sessions on startup. Any render/voice
 -- temp from a prior run is dead weight — the only live temps are created
 -- during the current session. Also catches curl resp/req JSON bodies.
@@ -321,6 +352,17 @@ local function cleanup_stale_temps()
       end
     end
   end
+  -- take_render_* are DIRECTORIES, which EnumerateFiles never lists — sweep
+  -- subdirectories separately and remove each stale render dir whole.
+  local di = 0
+  while true do
+    local sub = reaper.EnumerateSubdirectories(base, di)
+    if not sub then break end
+    di = di + 1
+    if sub:sub(1, #"take_render_") == "take_render_" then
+      remove_dir(base .. sub)
+    end
+  end
 end
 cleanup_stale_temps()
 
@@ -335,10 +377,15 @@ local function status_from(out)
   return tonumber(code) or 0
 end
 
+-- curl --connect-timeout/--max-time sit just under each ExecProcess timeout so
+-- curl exits on its own (writing http_code "000" -> status 0 -> "couldn't reach
+-- the server") instead of ExecProcess returning nil (status -1 -> the wrong
+-- "curl couldn't run" message) while an orphaned curl keeps running.
 local function http_get_json(path)
   local out_file = tmp_path("resp.json")
   local url = state.base_url .. path
-  local cmd = curl_bin() .. " -s -H " .. q("Authorization: Bearer " .. state.token)
+  local cmd = curl_bin() .. " -s --connect-timeout 10 --max-time 18"
+    .. " -H " .. q("Authorization: Bearer " .. state.token)
     .. " -o " .. q(out_file)
     .. " -w " .. q("%{http_code}")
     .. " " .. q(url)
@@ -355,7 +402,7 @@ local function http_post_json(path, tbl)
 
   local out_file = tmp_path("resp.json")
   local url = state.base_url .. path
-  local cmd = curl_bin() .. " -s -X POST"
+  local cmd = curl_bin() .. " -s --connect-timeout 10 --max-time 55 -X POST"
     .. " -H " .. q("Authorization: Bearer " .. state.token)
     .. " -H " .. q("Content-Type: application/json")
     .. " --data-binary " .. q("@" .. body_file)
@@ -368,7 +415,8 @@ end
 
 -- Download a (pre-signed) URL to dest. Returns http_status.
 local function http_download(url, dest)
-  local cmd = curl_bin() .. " -s -L -o " .. q(dest) .. " -w " .. q("%{http_code}") .. " " .. q(url)
+  local cmd = curl_bin() .. " -s --connect-timeout 10 --max-time 110 -L -o " .. q(dest)
+    .. " -w " .. q("%{http_code}") .. " " .. q(url)
   return status_from(reaper.ExecProcess(cmd, 120000))
 end
 
@@ -377,7 +425,7 @@ end
 -- otherwise status_from would parse a digit out of the JSON body.
 local function http_upload(url, filepath, content_type)
   local out_file = tmp_path("upload_resp.txt")
-  local cmd = curl_bin() .. " -s -X PUT -T " .. q(filepath)
+  local cmd = curl_bin() .. " -s --connect-timeout 10 --max-time 290 -X PUT -T " .. q(filepath)
     .. " -H " .. q("Content-Type: " .. content_type)
     .. " -o " .. q(out_file)
     .. " -w " .. q("%{http_code}")
@@ -434,11 +482,17 @@ local function render_to_temp(render_settings, pattern)
   reaper.GetSetProjectInfo_String(0, "RENDER_FILE", s_file, true)
   reaper.GetSetProjectInfo_String(0, "RENDER_PATTERN", s_pat, true)
 
-  -- 42230 renders synchronously, but large sessions with heavy plugins can
-  -- take a moment for the file handle to settle. Poll for up to 30 seconds.
-  local deadline = reaper.time_precise() + 30.0
+  -- 42230 renders synchronously, so when it returns the output already exists.
+  -- If an accepted file is there, use it. If files exist but none are accepted
+  -- (render format is OGG/Opus/video), bail immediately — don't spin a core for
+  -- 30s waiting for a file that will never appear. Only when the dir is still
+  -- empty do we briefly poll, to tolerate a slow file-handle flush on big sessions.
+  local file, ext = find_rendered(dir)
+  if file then return file, ext end
+  if reaper.EnumerateFiles(dir, 0) ~= nil then return nil end -- rendered, unaccepted format
+  local deadline = reaper.time_precise() + 3.0
   repeat
-    local file, ext = find_rendered(dir)
+    file, ext = find_rendered(dir)
     if file then return file, ext end
   until reaper.time_precise() > deadline
   return nil
@@ -446,7 +500,16 @@ end
 
 local function cleanup_render(path)
   if not path then return end
-  safe_remove(path)
+  -- The render lives alone in its own take_render_* dir; remove the whole dir
+  -- (rendered file + .reapeaks sidecar + any secondary-format outputs), not just
+  -- the one file, so nothing leaks in Scripts/. Fall back to the file alone if
+  -- the path isn't a render-dir child (defensive — never rmdir anything else).
+  local dir = path:match("^(.*)[/\\][^/\\]+$")
+  if dir and dir:find("take_render_", 1, true) then
+    remove_dir(dir)
+  else
+    safe_remove(path)
+  end
 end
 
 -- --------------------------------------------------------------------------
@@ -505,7 +568,7 @@ end
 
 local function comment_text(c)
   if c and c.is_voice then return "[voice memo]" end
-  return (c and c.body) or ""
+  return jval(c and c.body) or ""
 end
 
 local function short_text(s, max_len)
@@ -517,7 +580,8 @@ end
 
 local function comment_marker_name(c)
   local who = (c and c.author_name) or "Take"
-  local at = (c and c.timestamp_ms) and (" @" .. fmt_ts(c.timestamp_ms)) or ""
+  local ts = jval(c and c.timestamp_ms)
+  local at = ts and (" @" .. fmt_ts(ts)) or ""
   local text = comment_text(c)
   if text == "" then text = "comment" end
   return "Take: " .. who .. at .. " - " .. short_text(text, 80)
@@ -526,7 +590,12 @@ end
 local function load_comments()
   if not state.project then return end
   local http, body = http_get_json("/api/reaper/projects/" .. state.project.id .. "/comments")
-  if http ~= 200 then state.comments = {}; return end
+  -- A transient 5xx or a revoked token (401) shouldn't blank the panel — keep
+  -- whatever's already shown and say so, rather than silently wiping the list.
+  if http ~= 200 then
+    state.status = "Couldn't refresh comments (" .. http .. "). Showing the last load."
+    return
+  end
   local data = json_decode(body)
   state.comments = (data and data.comments) or {}
 end
@@ -625,7 +694,7 @@ local function sync_comment_markers()
   clear_take_markers()
   local added = 0
   for _, c in ipairs(state.comments) do
-    if c.timestamp_ms then
+    if jval(c.timestamp_ms) then
       if add_comment_marker(c) then added = added + 1 end
     end
   end
@@ -723,15 +792,18 @@ local function start_voice_record()
   state.status = "Recording (REAPER input 1)… speak, then Stop and post."
 end
 
-local function stop_and_post_voice()
-  if not state.recording or not state.voice then return end
+-- Stop the transport, recover the recorded source file, tear down the temp
+-- track, and restore every track's rec-arm + the edit cursor. Shared by the
+-- normal stop-and-post path and the atexit safety net, so closing the window or
+-- a script error mid-record never leaves the transport rolling or rec-arms
+-- zeroed. Returns the recorded file path and the comment timestamp (or nil).
+local function teardown_recording()
   local v = state.voice
-
   reaper.Main_OnCommand(1016, 0) -- Transport: Stop (finalizes the recorded file)
   state.recording = false
 
   local file
-  if v.track and reaper.GetTrackNumMediaItems(v.track) > 0 then
+  if v and v.track and reaper.GetTrackNumMediaItems(v.track) > 0 then
     local item = reaper.GetTrackMediaItem(v.track, 0)
     local take = item and reaper.GetActiveTake(item)
     if take then
@@ -740,15 +812,23 @@ local function stop_and_post_voice()
     end
   end
 
-  -- Tear down + restore BEFORE the upload so the session is clean either way.
-  if v.track then reaper.DeleteTrack(v.track) end
-  for i = 0, (v.count or 1) - 1 do
-    local t = reaper.GetTrack(0, i)
-    if t then reaper.SetMediaTrackInfo_Value(t, "I_RECARM", v.saved_arm[i] or 0) end
+  if v and v.track then reaper.DeleteTrack(v.track) end
+  if v then
+    for i = 0, (v.count or 1) - 1 do
+      local t = reaper.GetTrack(0, i)
+      if t then reaper.SetMediaTrackInfo_Value(t, "I_RECARM", v.saved_arm[i] or 0) end
+    end
+    reaper.SetEditCurPos(v.cursor or 0, false, false)
   end
-  reaper.SetEditCurPos(v.cursor or 0, false, false)
   reaper.UpdateArrange()
   state.voice = nil
+  return file, v and v.timestamp_ms
+end
+
+local function stop_and_post_voice()
+  if not state.recording or not state.voice then return end
+  -- Tear down + restore BEFORE the upload so the session is clean either way.
+  local file, timestamp_ms = teardown_recording()
 
   if not file or file == "" then
     state.status = "No recording found. Check your audio input device."
@@ -762,7 +842,7 @@ local function stop_and_post_voice()
 
   local ext = (file:match("%.([^.]+)$") or "wav"):lower()
   state.status = "Uploading voice memo…"
-  if post_voice_memo(file, ext, v.timestamp_ms) then
+  if post_voice_memo(file, ext, timestamp_ms) then
     safe_remove(file)
   end
 end
@@ -775,7 +855,11 @@ local function import_stem(stem)
   local data = json_decode(body)
   if not data or not data.url then state.status = "No download URL returned."; return end
 
-  local dest = tmp_path((data.filename or (stem.name .. ".wav")):gsub("[/\\]", "_"))
+  -- Prefix with the stem id so imports never collide by filename across
+  -- projects, and re-importing never reuses a path the project still holds open
+  -- (the Windows failure case). #15.
+  local safe_name = (data.filename or (stem.name .. ".wav")):gsub("[/\\]", "_")
+  local dest = tmp_path(stem.id .. "_" .. safe_name)
   local dl = http_download(data.url, dest)
   if dl ~= 200 then state.status = "Download failed (" .. dl .. ")."; return end
 
@@ -785,9 +869,13 @@ local function import_stem(stem)
   reaper.GetSetMediaTrackInfo_String(track, "P_NAME", stem.name, true)
   reaper.SetOnlyTrackSelected(track)
 
-  local offset_ms = data.timecode_offset_ms or stem.timecode_offset_ms or 0
+  -- Save + restore the edit cursor around the insert so a pull doesn't move the
+  -- user's playhead (the voice-record path restores it too). #28.
+  local saved_cursor = reaper.GetCursorPosition()
+  local offset_ms = jval(data.timecode_offset_ms) or jval(stem.timecode_offset_ms) or 0
   reaper.SetEditCurPos((offset_ms or 0) / 1000, false, false)
   reaper.InsertMedia(dest, 0) -- 0 = add to currently selected track at edit cursor
+  reaper.SetEditCurPos(saved_cursor, false, false)
   reaper.UpdateArrange()
   state.status = "Imported " .. stem.name .. "."
 end
@@ -1044,10 +1132,12 @@ local function start_pairing()
     state.status = "Couldn't start Connect (unexpected response)."
     return
   end
+  local interval = tonumber(data.interval) or 2
   state.pairing = {
     device_code = data.device_code,
     deadline = reaper.time_precise() + (tonumber(data.expires_in) or 600),
-    next_poll = reaper.time_precise() + (tonumber(data.interval) or 2),
+    interval = interval,
+    next_poll = reaper.time_precise() + interval,
   }
   open_file(data.verify_url)
   state.status = "Waiting for you to approve Take in your browser…"
@@ -1065,7 +1155,7 @@ local function poll_pairing()
     return
   end
   if now < p.next_poll then return end
-  p.next_poll = now + 2
+  p.next_poll = now + (p.interval or 2) -- honor the server-provided interval (#26)
 
   local http, body = http_get_json("/api/reaper/pair/poll?device_code=" .. p.device_code)
   if http == 404 then
@@ -1240,5 +1330,13 @@ local function loop()
   pop_theme()
   if open then reaper.defer(loop) end
 end
+
+-- Safety net: if the panel closes (window X, or a script error) mid-recording,
+-- REAPER would be left rolling with the temp track still armed and every other
+-- track's rec-arm zeroed. Restore the session on exit. No upload here — the
+-- recorded file just stays on disk and the startup sweep clears it next run.
+reaper.atexit(function()
+  if state.recording then pcall(teardown_recording) end
+end)
 
 reaper.defer(loop)

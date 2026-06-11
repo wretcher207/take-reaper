@@ -6,6 +6,10 @@
         <description><![CDATA[Take — the layer between your DAW and the people you make music with.]]></description>
         <link rel="website">https://takeaudio.com</link>
       </metadata>
+      <version name="0.6.5" author="Dead Pixel Design" time="2026-06-11T16:00:00Z">
+        <changelog><![CDATA[Reliability pass. A server JSON null can no longer crash a stem import or marker drop. Slow networks now say "couldn't reach the server" instead of "curl couldn't run," and curl stops cleanly on timeout instead of running on in the background. Render temp folders are fully removed (the file, its peaks sidecar, and the folder), and stale ones get swept on startup. Closing the panel mid-recording no longer leaves the transport rolling with your tracks' record-arm cleared. A failed comment refresh keeps the comments you already had instead of blanking the list. An unsupported render format fails fast instead of freezing REAPER for 30 seconds. Pulled stems no longer collide by filename and no longer move your edit cursor. Connect honors the server's poll interval.]]></changelog>
+        <source main="main">https://takeaudio.com/reaper/Take.lua</source>
+      </version>
       <version name="0.6.4" author="Dead Pixel Design" time="2026-06-10T20:00:00Z">
         <changelog><![CDATA[Launch hardening: JSON null values can no longer shift items out of the project/stem/comment lists; Connect fails fast with a clear message when the pairing is unknown instead of silently waiting out the 10-minute timeout; "couldn't reach the server" and "curl couldn't run" are now told apart; render temp folders use a properly seeded random suffix; the recording status says it captures REAPER input 1; informational notes (like "No paid projects") no longer render in the error color.]]></changelog>
         <source main="main">https://takeaudio.com/reaper/Take.lua</source>
