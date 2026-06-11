@@ -66,3 +66,17 @@
   child window is pushed onto the ImGui stack. Calling `EndChild` in that state
   triggers `Assertion failed: child_window->Flags & ImGuiWindowFlags_ChildWindow`.
   Always guard with `if BeginChild(...) then ... EndChild() end`.
+
+## 2026-06-11 — Audit findings (v0.6.4)
+
+- **`JSON_NULL` sentinel is truthy** — every `field or fallback` guard on server data is dead code since 0.6.4. `import_stem`'s `timecode_offset_ms or 0` (Take.lua:788) does arithmetic on a table if the server sends null. Needs a `jval()` unwrap helper at every object-field read.
+- **The publish .bat ships nothing.** ReaPack reads `takeaudio.com/reaper/index.xml` (served from take's `apps/web/public/reaper/`), not this repo. Releases require copying Take.lua + index.xml into the web app and redeploying; 0.6.3/0.6.4 went out by hand with no script.
+- **`reaper.EnumerateFiles` lists files only**, so `cleanup_stale_temps` can never match `take_render_*` directories — they leak forever. Use `reaper.EnumerateSubdirectories`.
+- **Synchronous `reaper.ExecProcess` curl calls freeze the whole REAPER UI** for the duration (upload timeout is 300 s). The detached-spawn + poll-a-status-file pattern `poll_pairing` uses is the fix; curl also needs `--connect-timeout/--max-time` so timeouts report as network errors, not "curl couldn't run".
+- Full findings list with fixes: `../take/AUDIT-2026-06-11.md` (issues #2, #3, #7–#11, #14, #15, #21–#28 are this repo).
+
+## 2026-06-11 (cont.) — #7 async HTTP is feasible (ExecProcess detach)
+
+- **`reaper.ExecProcess` blocks until the whole process group's stdout pipe hits EOF — a bare `&` does NOT make it return early.** Backgrounded child inherits the stdout pipe, so ExecProcess waits for the child even though the shell exited. Measured: `sh -c "sleep 2 &"` blocked 2025ms.
+- **Redirect all three std streams and it returns immediately while the process runs on:** `sh -c "sleep 2 </dev/null >/dev/null 2>&1 &"` → 19ms. Real detached curl: ExecProcess returned in 87ms; curl then finished in the background writing http_code=200 + body.
+- **Async HTTP pattern for #7:** `/bin/sh -c "curl -s -o BODY -w %{http_code} URL >STATUS 2>/dev/null </dev/null &"` → poll STATUS from the defer loop; non-empty = done, read code+body. This kills the upload UI-freeze. Build the upload path of `do_push` first as a defer-loop state machine. (Verified live in REAPER 7.74 on macOS via screencapture + osascript action-list run loop.)
