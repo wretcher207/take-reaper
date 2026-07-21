@@ -1,5 +1,5 @@
 -- @description Take for Reaper
--- @version 0.7.0
+-- @version 0.8.0
 -- @author Dead Pixel Design
 -- @about
 --   A docked panel that connects this Reaper session to your Take projects.
@@ -67,6 +67,8 @@ local state = {
   transfer = nil, -- in-flight transfer progress ({kind="up"|"down", path|prog, total})
   update_available = nil, -- newer version string found on the ReaPack index
   update_checked = false, -- the once-per-launch index check has run
+  propose_note = "", -- optional note attached to a cut/loop proposal
+  loop_count = 2, -- proposed loop repeat count (server clamps to 2..8)
 }
 if state.base_url == ""
     or state.base_url == "https://take-ebon.vercel.app"
@@ -791,7 +793,20 @@ local function comment_key(c)
   return tostring((c and c.id) or (c and c.created_at) or "comment")
 end
 
+-- Cut/loop proposals arrive as comments with proposal_* fields attached
+-- (comments GET, since server migration 0028). Range in ms, or nil when the
+-- comment isn't a proposal.
+local function proposal_range(c)
+  local s = tonumber(c and c.proposal_start_ms)
+  local e = tonumber(c and c.proposal_end_ms)
+  if not s or not e or e <= s then return nil end
+  return s, e
+end
+
 local function comment_lane(c)
+  local kind = c and c.proposal_kind
+  if kind == "cut" then return "CUT" end
+  if kind == "loop" then return "LOOP" end
   local pinned = c and c.pinned_to or "project"
   if pinned == "rough_ts" then return "ROUGH" end
   if pinned == "stem_ts" then return "STEM" end
@@ -811,12 +826,23 @@ local function short_text(s, max_len)
   return s:sub(1, max_len - 3) .. "..."
 end
 
+-- "Cut 0:12-0:31" / "Loop 0:12-0:31 x4", or nil for a plain comment.
+local function proposal_label(c)
+  local s, e = proposal_range(c)
+  if not s then return nil end
+  local label = (c.proposal_kind == "loop" and "Loop " or "Cut ") .. fmt_ts(s) .. "-" .. fmt_ts(e)
+  local n = tonumber(c.proposal_loop_count)
+  if c.proposal_kind == "loop" and n then label = label .. " x" .. n end
+  return label
+end
+
 local function comment_marker_name(c)
   local who = (c and c.author_name) or "Take"
+  local pl = proposal_label(c)
   local ts = jval(c and c.timestamp_ms)
-  local at = ts and (" @" .. fmt_ts(ts)) or ""
+  local at = pl and (" " .. pl) or (ts and (" @" .. fmt_ts(ts)) or "")
   local text = comment_text(c)
-  if text == "" then text = "comment" end
+  if text == "" then text = pl and "proposal" or "comment" end
   return "Take: " .. who .. at .. " - " .. short_text(text, 80)
 end
 
@@ -917,6 +943,46 @@ local function post_comment()
   end
 end
 
+-- Post a cut/loop proposal built from REAPER's time selection. The server
+-- pins it to the current rough (comment + edit_proposal, atomic) and clamps
+-- loop counts to 2..8. Runs inside a job like every network button.
+local function propose_edit(kind, sel_start, sel_end)
+  if not state.project then state.status = "Open a project first."; return end
+  if state.token == "" then state.status = "Add a token in Settings first."; return end
+  local start_ms = math.floor((sel_start or 0) * 1000)
+  local end_ms = math.floor((sel_end or 0) * 1000)
+  if end_ms <= start_ms then
+    state.status = "Make a time selection first."
+    return
+  end
+  local note = state.propose_note
+  local payload = { kind = kind, startMs = start_ms, endMs = end_ms }
+  if kind == "loop" then payload.loopCount = state.loop_count or 2 end
+  if note ~= "" and not note:match("^%s*$") then payload.body = note end
+
+  state.status = "Proposing " .. kind .. "…"
+  start_job(function()
+    local http, resp_body = http_post_json(
+      "/api/reaper/projects/" .. state.project.id .. "/proposals", payload)
+    if http == 401 then state.status = "Token rejected. Check it in Settings."; return end
+    if http == 403 then state.status = "This project's owner isn't on a paid plan."; return end
+    if http == 409 then
+      state.status = "No current rough — push a rough first; proposals attach to it."
+      return
+    end
+    if http ~= 200 then state.status = "Couldn't save the proposal (" .. http .. ")."; return end
+    local resp = json_decode(resp_body)
+    local created = resp and resp.comment
+    if created and type(created) == "table" and created.id then
+      state.comments[#state.comments + 1] = created
+      state.scroll_comments = true
+    end
+    if state.propose_note == note then state.propose_note = "" end
+    load_comments()
+    state.status = "Proposed " .. kind .. " " .. fmt_ts(start_ms) .. "-" .. fmt_ts(end_ms) .. "."
+  end)
+end
+
 local function jump_to_comment(c)
   local ms = c and tonumber(c.timestamp_ms)
   if not ms then
@@ -927,14 +993,36 @@ local function jump_to_comment(c)
   state.status = "Cursor at " .. fmt_ts(ms) .. "."
 end
 
+-- Set REAPER's time selection (and cursor) to a proposal's range, so the user
+-- can audition it — with Repeat on, playing a loop proposal loops it.
+local function select_proposal(c)
+  local s, e = proposal_range(c)
+  if not s then
+    state.status = "That comment has no cut/loop range."
+    return
+  end
+  reaper.GetSet_LoopTimeRange(true, false, s / 1000, e / 1000, false)
+  reaper.SetEditCurPos(s / 1000, true, false)
+  state.status = "Selected " .. fmt_ts(s) .. "-" .. fmt_ts(e) .. "."
+end
+
+-- Point marker for a timeline comment; a spanning REGION for a cut/loop
+-- proposal. Both carry the "Take: " prefix so Clear can find them.
 local function add_comment_marker(c)
+  local color = 0
+  if reaper.ColorToNative then color = reaper.ColorToNative(237, 111, 92) + 0x1000000 end
+  local s, e = proposal_range(c)
+  if s and e then
+    reaper.AddProjectMarker2(0, true, s / 1000, e / 1000, comment_marker_name(c), -1, color)
+    reaper.UpdateArrange()
+    state.status = "Added region " .. fmt_ts(s) .. "-" .. fmt_ts(e) .. "."
+    return true
+  end
   local ms = c and tonumber(c.timestamp_ms)
   if not ms then
     state.status = "Only timeline comments can become markers."
     return false
   end
-  local color = 0
-  if reaper.ColorToNative then color = reaper.ColorToNative(237, 111, 92) + 0x1000000 end
   reaper.AddProjectMarker2(0, false, ms / 1000, 0, comment_marker_name(c), -1, color)
   reaper.UpdateArrange()
   state.status = "Added marker at " .. fmt_ts(ms) .. "."
@@ -947,8 +1035,9 @@ local function clear_take_markers()
   local removed = 0
   for i = total - 1, 0, -1 do
     local _, is_region, _, _, name, index = reaper.EnumProjectMarkers3(0, i)
-    if not is_region and name and name:sub(1, 6) == "Take: " then
-      reaper.DeleteProjectMarker(0, index, false)
+    -- Proposals sync as regions, plain comments as markers — clear both.
+    if name and name:sub(1, 6) == "Take: " then
+      reaper.DeleteProjectMarker(0, index, is_region and true or false)
       removed = removed + 1
     end
   end
@@ -1402,14 +1491,21 @@ local function draw_comment_item(c)
   local lane = comment_lane(c)
   local who = (c and c.author_name) or "?"
   local ms = c and tonumber(c.timestamp_ms)
-  local at = ms and (" @" .. fmt_ts(ms)) or ""
+  local pl = proposal_label(c)
+  local at = pl and (" " .. pl) or (ms and (" @" .. fmt_ts(ms)) or "")
 
   reaper.ImGui_TextColored(ctx, COLORS.coral, lane)
   reaper.ImGui_SameLine(ctx)
   reaper.ImGui_TextColored(ctx, COLORS.ink, who .. at)
-  reaper.ImGui_TextWrapped(ctx, comment_text(c))
+  local text = comment_text(c)
+  if text ~= "" then reaper.ImGui_TextWrapped(ctx, text) end
 
-  if ms then
+  if pl then
+    -- Cut/loop proposal: audition the range, or drop a spanning region.
+    if reaper.ImGui_Button(ctx, "Select##sel_" .. key) then select_proposal(c) end
+    reaper.ImGui_SameLine(ctx)
+    if reaper.ImGui_Button(ctx, "Region##region_" .. key) then add_comment_marker(c) end
+  elseif ms then
     if reaper.ImGui_Button(ctx, "Jump##jump_" .. key) then jump_to_comment(c) end
     reaper.ImGui_SameLine(ctx)
     if reaper.ImGui_Button(ctx, "Marker##marker_" .. key) then add_comment_marker(c) end
@@ -1463,7 +1559,7 @@ local function draw_status()
       or lowered:find("url returned") or lowered:find("isn't on a paid plan") then
     color = COLORS.danger
   elseif lowered:find("posted") or lowered:find("pushed") or lowered:find("imported")
-      or lowered:find("connected") then
+      or lowered:find("connected") or lowered:find("proposed") then
     color = COLORS.success
   end
 
@@ -1668,6 +1764,22 @@ local function draw_project()
   reaper.ImGui_SetNextItemWidth(ctx, content_width())
   changed, state.push_name = reaper.ImGui_InputText(ctx, "Name (optional)", state.push_name)
   if primary_button("Push selected track", content_width()) then push_stem() end
+
+  section_title("Propose", "cut / loop from time selection")
+  local sel_start, sel_end = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
+  if not sel_end or sel_end <= (sel_start or 0) then
+    muted_text("Make a time selection in REAPER to propose a cut or loop.")
+  else
+    muted_text("Selection: " .. fmt_ts(math.floor(sel_start * 1000)) .. "-" .. fmt_ts(math.floor(sel_end * 1000)))
+    reaper.ImGui_SetNextItemWidth(ctx, content_width())
+    changed, state.propose_note = reaper.ImGui_InputText(ctx, "Note (optional)##propose", state.propose_note)
+    if primary_button("Propose cut") then propose_edit("cut", sel_start, sel_end) end
+    reaper.ImGui_SameLine(ctx)
+    if primary_button("Propose loop") then propose_edit("loop", sel_start, sel_end) end
+    reaper.ImGui_SameLine(ctx)
+    reaper.ImGui_SetNextItemWidth(ctx, 80)
+    changed, state.loop_count = reaper.ImGui_SliderInt(ctx, "##loop_count", state.loop_count, 2, 8, "x%d")
+  end
 
   section_title("Comments", #state.comments > 0 and (#state.comments .. " in this project") or "")
   if reaper.ImGui_Button(ctx, "Refresh comments") then start_job(load_comments) end

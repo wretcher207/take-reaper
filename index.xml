@@ -6,6 +6,10 @@
         <description><![CDATA[Take — the layer between your DAW and the people you make music with.]]></description>
         <link rel="website">https://takeaudio.com</link>
       </metadata>
+      <version name="0.8.0" author="Dead Pixel Design" time="2026-07-21T16:00:00Z">
+        <changelog><![CDATA[Cut and loop proposals, from inside REAPER. Make a time selection, optionally type a note, and hit Propose cut or Propose loop (with a x2-x8 repeat count) — the proposal lands on the project's current rough as a comment with the selected range attached, exactly like proposals made on the web. Proposals in the comment list show as CUT or LOOP lanes with their range; Select sets your time selection to the proposed range (turn on Repeat to audition a loop), and Region drops a spanning REAPER region. Drop timeline markers now creates regions for proposals and points for plain comments, and Clear Take markers removes both. Requires the matching takeaudio.com update; older servers return an error and nothing is posted.]]></changelog>
+        <source main="main">https://takeaudio.com/reaper/Take.lua</source>
+      </version>
       <version name="0.7.0" author="Dead Pixel Design" time="2026-07-21T14:00:00Z">
         <changelog><![CDATA[Quality-of-life release. Transfers show live progress: uploads report a percentage read from curl's progress meter, downloads report received size (with a percentage when the server states the total). Comments auto-refresh every 30 seconds while a project is open and note how many new ones arrived. Import all pulls every stem you don't already have, and stems already in your session are labeled "(in session)". Pick which audio input voice memos record from in Settings (previously hardcoded to input 1; the choice is remembered, and falls back to input 1 if the saved input disappears after a device change). Once per launch the panel checks the ReaPack index and shows a dismissible nudge when a newer Take version is available.]]></changelog>
         <source main="main">https://takeaudio.com/reaper/Take.lua</source>

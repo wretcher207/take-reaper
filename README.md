@@ -70,6 +70,12 @@ For posted voice memo comments, **Voice** downloads the memo through a short-liv
 
 Pick which audio input the memo records from under **Settings > Voice memos** (defaults to input 1). The choice is remembered between sessions.
 
+## Propose a cut or loop
+
+Make a time selection on your timeline. The **Propose** section shows the range — optionally add a note, then hit **Propose cut** or **Propose loop** (the slider sets the loop's repeat count, x2 to x8). The proposal pins to the project's current rough, so push a rough first if there isn't one.
+
+Proposals show up in the comment list as **CUT** or **LOOP** lanes with their range. **Select** sets your time selection to the proposed range — turn on Repeat and hit play to audition a loop. **Region** drops a spanning REAPER region named `Take: ...`. **Drop timeline markers** creates regions for proposals and markers for plain comments; **Clear Take markers** removes both.
+
 ## Install
 
 Requires the **ReaImGui** extension. Install it via ReaPack from the default ReaTeam repository if you don't have it.
