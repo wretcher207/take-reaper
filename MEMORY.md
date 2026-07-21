@@ -1,5 +1,27 @@
 # MEMORY — Take for Reaper (decision log)
 
+## 2026-07-21 — Review sweep: 0.6.8 + 0.7.0 + 0.8.0 staged, unpublished
+
+- **Three versions committed, none published or live-tested.** See `HANDOFF.md`
+  for the full state, ship order (migration 0028 → deploy take → publish.bat),
+  and smoke-test watch-list.
+- **Decided: sanitize at choke points, not call sites.** Server strings reach
+  shell scripts (async curl) only through `safe_url` (validated in the four
+  `http_*` helpers) and `safe_filename` (both download sites). JSON nulls are
+  dropped at decode for object keys instead of `jval()` at every read — `jval`
+  remains only for array elements.
+- **Decided: cut/loop proposals reuse the comment pipe.** New
+  `reaper_create_proposal` RPC + `/api/reaper/projects/:id/proposals` route in
+  the take repo (commit `583fa4a`); proposals arrive as comments with
+  `proposal_*` fields on the existing comments GET. Panel posts from the time
+  selection; 409 = no current rough (distinct from 403 paid-gate).
+- **Decided: test harness in-repo.** `tools/check.js` (luaparse + wasmoon
+  Lua 5.4 VM) runs from both publish scripts and aborts a release on failure.
+  This is the only pre-REAPER verification path on a machine with no Lua.
+- **The take repo is public on GitHub** — cloned as the `../take` sibling
+  publish.bat expects. Vercel-author gotcha honored (commits authored as
+  davidrussell112688@gmail.com).
+
 ## 2026-06-09 — ReaPack "could not resolve host" was a malformed `<source>`, not DNS
 
 - **Root cause:** ReaPack index `<source>` must hold the absolute download URL as
