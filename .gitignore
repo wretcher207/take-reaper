@@ -1,3 +1,7 @@
 
 # serena tool state
 .serena/
+
+# test harness dependencies (tools/check.js installs these on first run)
+tools/node_modules/
+tools/package-lock.json

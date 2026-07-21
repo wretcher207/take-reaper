@@ -1,0 +1,12 @@
+{
+  "name": "take-reaper-tools",
+  "private": true,
+  "description": "Test harness for Take.lua: syntax check + unit tests for the pure-Lua parts, run in a real Lua 5.4 VM (wasmoon). No REAPER required.",
+  "scripts": {
+    "check": "node check.js"
+  },
+  "dependencies": {
+    "luaparse": "^0.3.1",
+    "wasmoon": "^1.16.0"
+  }
+}

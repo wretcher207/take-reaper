@@ -9,10 +9,16 @@ VERSION=$(grep '^-- @version' Take.lua | awk '{print $3}')
 echo "Publishing Take v$VERSION"
 grep -q "<version name=\"$VERSION\"" index.xml || { echo "index.xml has no block for v$VERSION — add the changelog first."; exit 1; }
 command -v luac >/dev/null 2>&1 && luac -p Take.lua
+if command -v node >/dev/null 2>&1; then
+  [ -d tools/node_modules ] || (cd tools && npm install --silent --no-audit --no-fund)
+  node tools/check.js || { echo "Take.lua checks failed. Not publishing."; exit 1; }
+else
+  echo "node not found; skipping Take.lua test harness."
+fi
 WEB=../take/apps/web/public/reaper; APP=../take/apps/reaper
 [ -d "$WEB" ] || { echo "Can't find $WEB — is the take repo a sibling?"; exit 1; }
 cp Take.lua index.xml "$WEB"/; cp Take.lua index.xml "$APP"/
-git add Take.lua index.xml publish.sh publish.bat
+git add Take.lua index.xml README.md publish.sh publish.bat tools
 git commit -m "Take v$VERSION" || true
 git push origin main
 ( cd ../take && git add apps/web/public/reaper apps/reaper && (git commit -m "Reaper: publish Take v$VERSION" || true) && git push && vercel --prod --yes )

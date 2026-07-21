@@ -53,6 +53,25 @@ if not errorlevel 1 (
   echo luac not found; skipping local Lua syntax check.
 )
 
+REM --- Syntax + unit tests via the Node harness (tools/check.js) ------
+where node >nul 2>nul
+if not errorlevel 1 (
+  if not exist "tools\node_modules\" (
+    echo Installing test harness dependencies...
+    pushd tools
+    call npm install --silent --no-audit --no-fund
+    popd
+  )
+  node tools\check.js
+  if errorlevel 1 (
+    echo.
+    echo Take.lua checks failed. Not publishing.
+    pause & exit /b 1
+  )
+) else (
+  echo node not found; skipping Take.lua test harness.
+)
+
 REM --- Locate the sibling take repo ----------------------------------
 set "WEB=..\take\apps\web\public\reaper"
 set "APP=..\take\apps\reaper"
@@ -70,7 +89,7 @@ echo Copied Take.lua + index.xml into the take repo.
 echo.
 
 REM --- Commit + push take-reaper (this repo) -------------------------
-git add Take.lua index.xml publish.bat
+git add Take.lua index.xml README.md publish.bat publish.sh tools
 git commit -m "Take v%VERSION%" >nul 2>nul
 git push origin main
 if errorlevel 1 ( echo take-reaper push failed. & pause & exit /b 1 )

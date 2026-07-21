@@ -42,6 +42,8 @@ The ReaPack URL installs the script. It is not the Server URL.
 
 Click **Import** next to any stem. Take downloads the original WAV and drops it on a new track at its stored timecode. Nothing leaves your DAW.
 
+**Import all** pulls every stem you don't already have. Stems whose files are already in your session are labeled **(in session)**.
+
 ## Push
 
 Select a track, optionally type a name, click **Push stem**. Take renders that track and uploads it as a new stem on the project.
@@ -50,11 +52,11 @@ Click **Render and push as rough** at the top of a project. Take renders your ma
 
 These reuse your project's render format. Set it once in **File > Render**. WAV, AIFF, FLAC, or MP3. WAV is the default.
 
-The web app generates the compressed playback copy after upload. A pushed file shows as "processing" for a moment before it plays.
+The web app generates the compressed playback copy after upload. A pushed file shows as "processing" for a moment before it plays. The status area shows live transfer progress while an upload or download runs.
 
 ## Comment and voice memo
 
-The **Comments** section lists the discussion on the current rough.
+The **Comments** section lists the discussion on the current rough. It refreshes itself every 30 seconds while a project is open, so collaborator feedback shows up as you work.
 
 Timeline comments have **Jump** and **Marker** actions. Jump moves Reaper's edit cursor to the comment time. Marker drops a Reaper project marker named `Take: ...` at that timestamp. **Drop timeline markers** adds markers for every timestamped Take comment, and **Clear Take markers** removes only markers with the `Take:` prefix.
 
@@ -66,7 +68,7 @@ Type into **New comment** and press **Post comment**. With **At edit cursor** ch
 
 For posted voice memo comments, **Voice** downloads the memo through a short-lived Take URL and opens it with your system audio player.
 
-Make sure your mic is on Reaper's first audio input.
+Pick which audio input the memo records from under **Settings > Voice memos** (defaults to input 1). The choice is remembered between sessions.
 
 ## Install
 
@@ -76,6 +78,8 @@ Requires the **ReaImGui** extension. Install it via ReaPack from the default Rea
 2. Paste this URL: `https://takeaudio.com/reaper/index.xml`
 3. Install **Take.lua** from the "Take" category
 4. Bind it to a keyboard shortcut or find it in the Actions list
+
+The panel checks once per launch whether a newer Take version is on ReaPack and shows a nudge to synchronize.
 
 ## Pricing
 

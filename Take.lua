@@ -1,5 +1,5 @@
 -- @description Take for Reaper
--- @version 0.6.8
+-- @version 0.7.0
 -- @author Dead Pixel Design
 -- @about
 --   A docked panel that connects this Reaper session to your Take projects.
@@ -22,6 +22,17 @@ end
 local EXT = "TAKE"
 local DEFAULT_BASE_URL = "https://takeaudio.com"
 local ctx = reaper.ImGui_CreateContext("Take")
+
+-- Read our own "-- @version" header so the update check has one source of
+-- truth (no second constant to forget when bumping).
+local VERSION = (function()
+  local path = debug.getinfo(1, "S").source:match("^@(.+)$")
+  local f = path and io.open(path, "rb")
+  if not f then return nil end
+  local head = f:read(400) or ""
+  f:close()
+  return head:match("%-%- @version%s+(%S+)")
+end)()
 
 -- Seed math.random (render temp-dir suffixes). Unseeded Lua repeats the same
 -- sequence every REAPER launch, so two same-second pushes could collide.
@@ -49,6 +60,13 @@ local state = {
   pairing = nil, -- in-flight one-click Connect (device_code, deadline, next_poll)
   scroll_comments = false, -- set after post_comment to auto-scroll to bottom
   job = nil, -- in-flight async network job (a coroutine pumped by loop())
+  voice_input = tonumber(reaper.GetExtState(EXT, "voice_input")) or 0, -- mono input for memos (0-based)
+  stem_presence = {}, -- stem_id -> true when its file is already in this session
+  presence_next = 0, -- next stem-presence rescan (throttled from the draw)
+  comments_next_poll = 0, -- next live comment auto-refresh
+  transfer = nil, -- in-flight transfer progress ({kind="up"|"down", path|prog, total})
+  update_available = nil, -- newer version string found on the ReaPack index
+  update_checked = false, -- the once-per-launch index check has run
 }
 if state.base_url == ""
     or state.base_url == "https://take-ebon.vercel.app"
@@ -374,6 +392,26 @@ local function safe_filename(name)
   return name
 end
 
+local function fmt_bytes(n)
+  n = tonumber(n) or 0
+  if n >= 1024 * 1024 * 1024 then return string.format("%.2f GB", n / (1024 * 1024 * 1024)) end
+  if n >= 1024 * 1024 then return string.format("%.1f MB", n / (1024 * 1024)) end
+  if n >= 1024 then return string.format("%.0f KB", n / 1024) end
+  return math.floor(n) .. " B"
+end
+
+-- true when version string a is strictly newer than b ("0.10.1" > "0.9.9").
+local function version_newer(a, b)
+  local ai = {}; for d in tostring(a or ""):gmatch("%d+") do ai[#ai + 1] = tonumber(d) end
+  local bi = {}; for d in tostring(b or ""):gmatch("%d+") do bi[#bi + 1] = tonumber(d) end
+  if #ai == 0 or #bi == 0 then return false end
+  for i = 1, math.max(#ai, #bi) do
+    local x, y = ai[i] or 0, bi[i] or 0
+    if x ~= y then return x > y end
+  end
+  return false
+end
+
 -- Remove a directory and everything in it. Used for the per-render temp dirs
 -- (take_render_*), which hold the rendered file plus .reapeaks sidecars and any
 -- secondary-format outputs. EnumerateFiles lists files only, so collect them all
@@ -400,7 +438,7 @@ end
 -- during the current session. Also catches curl resp/req JSON bodies.
 local function cleanup_stale_temps()
   local base = reaper.GetResourcePath() .. "/Scripts/"
-  local prefixes = { "take_render_", "take_voice_", "take_resp", "take_req", "take_upload_resp", "take_job_" }
+  local prefixes = { "take_render_", "take_voice_", "take_resp", "take_req", "take_upload_resp", "take_prog_", "take_job_" }
   for _, prefix in ipairs(prefixes) do
     local i = 0
     while true do
@@ -448,7 +486,7 @@ end
 -- the 3-digit code. Sync mode reads it out of ExecProcess's "<exit>\n<code>";
 -- async mode redirects that stdout into a file and reads it back when done.
 local JOB_SEQ = 0
-local function http_run(cmd, timeout_ms)
+local function http_run(cmd, timeout_ms, progress_file)
   local co, ismain = coroutine.running()
   if not co or ismain then
     return status_from(reaper.ExecProcess(cmd, timeout_ms))
@@ -458,6 +496,10 @@ local function http_run(cmd, timeout_ms)
   local jid = os.time() .. "_" .. JOB_SEQ
   local code_tmp = tmp_path("job_" .. jid .. ".code")
   local done = tmp_path("job_" .. jid .. ".done")
+  -- Normally curl's stderr is discarded; a caller showing upload progress
+  -- passes progress_file so the panel can read the meter back mid-transfer.
+  local stderr_win = progress_file and q(progress_file) or "nul"
+  local stderr_sh = progress_file and q(progress_file) or "/dev/null"
   local script
   if IS_WIN then
     -- In a .bat a literal % must be doubled, so curl's "%{http_code}" needs
@@ -466,14 +508,14 @@ local function http_run(cmd, timeout_ms)
     script = tmp_path("job_" .. jid .. ".bat")
     write_file(script,
       "@echo off\r\n" ..
-      cmd:gsub("%%", "%%%%") .. " > " .. q(code_tmp) .. " 2>nul\r\n" ..
+      cmd:gsub("%%", "%%%%") .. " > " .. q(code_tmp) .. " 2>" .. stderr_win .. "\r\n" ..
       "move /y " .. q(code_tmp) .. " " .. q(done) .. " >nul 2>nul\r\n")
     reaper.ExecProcess('cmd /c start "" /b cmd /c ' .. q(script), 10)
   else
     script = tmp_path("job_" .. jid .. ".sh")
     write_file(script,
       "#!/bin/sh\n" ..
-      cmd .. " > " .. q(code_tmp) .. " 2>/dev/null\n" ..
+      cmd .. " > " .. q(code_tmp) .. " 2>" .. stderr_sh .. "\n" ..
       "mv " .. q(code_tmp) .. " " .. q(done) .. "\n")
     -- The trailing `&` (inside sh -c) is what actually detaches; without the
     -- stdio redirects ExecProcess still waits on the pipe and we gain nothing.
@@ -523,6 +565,16 @@ end
 -- keeps the read-the-last-response-off-disk debugging trick working.
 local REQ_SEQ = 0
 
+-- Keep only the most recent request/response body on disk. The newest stays
+-- readable for debugging (see LEARNINGS); everything older is retired once the
+-- next call has safely read its own copy, so the 30s live-comment poll can't
+-- pile up hundreds of temp files over a long session.
+local LAST_REQ, LAST_RESP
+local function retire_temps(req_file, resp_file)
+  if req_file then safe_remove(LAST_REQ); LAST_REQ = req_file end
+  if resp_file then safe_remove(LAST_RESP); LAST_RESP = resp_file end
+end
+
 local function http_get_json(path)
   local url = safe_url(state.base_url .. path)
   if not url then return 0, "" end
@@ -534,7 +586,9 @@ local function http_get_json(path)
     .. " -w " .. q("%{http_code}")
     .. " " .. q(url)
   local http = http_run(cmd, 20000)
-  return http, read_file(out_file) or ""
+  local body = read_file(out_file) or ""
+  retire_temps(nil, out_file)
+  return http, body
 end
 
 local function http_post_json(path, tbl)
@@ -556,32 +610,46 @@ local function http_post_json(path, tbl)
     .. " -w " .. q("%{http_code}")
     .. " " .. q(url)
   local http = http_run(cmd, 60000)
-  return http, read_file(out_file) or ""
+  local body = read_file(out_file) or ""
+  retire_temps(body_file, out_file)
+  return http, body
 end
 
--- Download a (pre-signed) URL to dest. Returns http_status.
-local function http_download(url, dest)
+-- Download a (pre-signed) URL to dest. Returns http_status. total (optional,
+-- bytes) improves the progress line from "12.4 MB" to a percentage.
+local function http_download(url, dest, total)
   url = safe_url(url)
   if not url then return 0 end
+  state.transfer = { kind = "down", path = dest, total = tonumber(total) }
   local cmd = curl_bin() .. " -s --connect-timeout 10 --max-time 110 -L -o " .. q(dest)
     .. " -w " .. q("%{http_code}") .. " " .. q(url)
-  return http_run(cmd, 120000)
+  local http = http_run(cmd, 120000)
+  state.transfer = nil
+  return http
 end
 
 -- PUT a file to a (pre-signed) upload URL, streamed. Returns http_status.
 -- The response body is diverted to a file (-o) so stdout is only the http_code;
--- otherwise status_from would parse a digit out of the JSON body.
+-- otherwise status_from would parse a digit out of the JSON body. Instead of
+-- -s we use -# (progress bar) with stderr routed to a file, which is what the
+-- panel reads back to show a live percentage — uploads always run inside a
+-- job, so the sync path (where stderr is discarded) never carries -#.
 local function http_upload(url, filepath, content_type)
   url = safe_url(url)
   if not url then return 0 end
   REQ_SEQ = REQ_SEQ + 1
   local out_file = tmp_path("upload_resp_" .. REQ_SEQ .. ".txt")
-  local cmd = curl_bin() .. " -s --connect-timeout 10 --max-time 290 -X PUT -T " .. q(filepath)
+  local prog_file = tmp_path("prog_" .. REQ_SEQ .. ".txt")
+  state.transfer = { kind = "up", prog = prog_file, total = file_size(filepath) }
+  local cmd = curl_bin() .. " -# --connect-timeout 10 --max-time 290 -X PUT -T " .. q(filepath)
     .. " -H " .. q("Content-Type: " .. content_type)
     .. " -o " .. q(out_file)
     .. " -w " .. q("%{http_code}")
     .. " " .. q(url)
-  return http_run(cmd, 300000)
+  local http = http_run(cmd, 300000, prog_file)
+  state.transfer = nil
+  safe_remove(prog_file)
+  return http
 end
 
 -- --------------------------------------------------------------------------
@@ -699,6 +767,20 @@ local function load_projects()
     or (#state.projects .. " project(s).")
 end
 
+-- Once per launch (from loop, when the job slot is idle): pull the ReaPack
+-- index this panel installs from and nudge if a newer version is listed.
+-- Newest version sits first in the index, so the first match is enough.
+local function check_for_update()
+  if not VERSION then return end
+  local dest = tmp_path("resp_update.xml")
+  local http = http_download(state.base_url .. "/reaper/index.xml", dest)
+  if http ~= 200 then return end
+  local newest = (read_file(dest) or ""):match('<version name="([%d%.]+)"')
+  if newest and version_newer(newest, VERSION) then
+    state.update_available = newest
+  end
+end
+
 local function fmt_ts(ms)
   if not ms then return "" end
   local total = math.floor(ms / 1000)
@@ -738,29 +820,59 @@ local function comment_marker_name(c)
   return "Take: " .. who .. at .. " - " .. short_text(text, 80)
 end
 
-local function load_comments()
+-- silent: the 30s auto-refresh passes true so a transient failure doesn't
+-- overwrite the status line, and arriving comments get a short notice.
+local function load_comments(silent)
   if not state.project then return end
   local http, body = http_get_json("/api/reaper/projects/" .. state.project.id .. "/comments")
   -- A transient 5xx or a revoked token (401) shouldn't blank the panel — keep
   -- whatever's already shown and say so, rather than silently wiping the list.
   if http ~= 200 then
-    state.status = "Couldn't refresh comments (" .. http .. "). Showing the last load."
+    if not silent then
+      state.status = "Couldn't refresh comments (" .. http .. "). Showing the last load."
+    end
     return
   end
   local data = json_decode(body)
-  state.comments = (data and data.comments) or {}
+  local fresh = (data and data.comments) or {}
+  if silent and #state.comments > 0 and #fresh > #state.comments then
+    state.status = (#fresh - #state.comments) .. " new comment(s)."
+  end
+  state.comments = fresh
+end
+
+-- Which stems already live in this session? Imported files are prefixed with
+-- the stem id, so match media source filenames against the ids. Cheap (native
+-- API calls only); rescanned on a 2s throttle from the stems draw.
+local function refresh_stem_presence()
+  local present = {}
+  local n = reaper.CountMediaItems(0)
+  for i = 0, n - 1 do
+    local item = reaper.GetMediaItem(0, i)
+    local take = item and reaper.GetActiveTake(item)
+    local src = take and reaper.GetMediaItemTake_Source(take)
+    local fn = src and reaper.GetMediaSourceFileName(src, "")
+    if fn and fn ~= "" then
+      for _, s in ipairs(state.stems) do
+        if s.id and fn:find(tostring(s.id), 1, true) then present[s.id] = true end
+      end
+    end
+  end
+  state.stem_presence = present
 end
 
 local function open_project(p)
-  state.status = "Loading " .. p.name .. "…"
+  state.status = "Loading " .. tostring(p.name or "project") .. "…"
   state.comments = {}
   state.scroll_comments = false
+  state.comments_next_poll = 0 -- restart the live-refresh clock for this project
   local http, body = http_get_json("/api/reaper/projects/" .. p.id)
   if http ~= 200 then state.status = "Couldn't open project (" .. http .. ")."; return end
   local data = json_decode(body)
   state.project = data and data.project or p
   state.stems = (data and data.stems) or {}
   state.view = "project"
+  refresh_stem_presence()
   load_comments()
   state.status = #state.stems .. " stem(s), " .. #state.comments .. " comment(s)."
 end
@@ -941,11 +1053,16 @@ local function start_voice_record()
     reaper.SetMediaTrackInfo_Value(t, "I_RECARM", 0)
   end
 
+  -- Record from the input chosen in Settings (falls back to input 1 when the
+  -- saved index no longer exists, e.g. after switching audio devices).
+  local input = state.voice_input or 0
+  if input < 0 or input >= (reaper.GetNumAudioInputs() or 0) then input = 0 end
+
   reaper.InsertTrackAtIndex(v.count, false)
   v.track = reaper.GetTrack(0, v.count)
   reaper.GetSetMediaTrackInfo_String(v.track, "P_NAME", "Take voice memo (temp)", true)
   reaper.SetMediaTrackInfo_Value(v.track, "I_RECARM", 1)
-  reaper.SetMediaTrackInfo_Value(v.track, "I_RECINPUT", 0) -- mono hardware input 1
+  reaper.SetMediaTrackInfo_Value(v.track, "I_RECINPUT", input) -- mono hardware input
   reaper.SetMediaTrackInfo_Value(v.track, "I_RECMON", 0)   -- no input monitoring (no feedback)
   reaper.SetMediaTrackInfo_Value(v.track, "I_RECMODE", 0)  -- record input
 
@@ -954,7 +1071,9 @@ local function start_voice_record()
 
   state.voice = v
   state.recording = true
-  state.status = "Recording (REAPER input 1)… speak, then Stop and post."
+  local input_name = reaper.GetInputChannelName(input)
+  input_name = (input_name and input_name ~= "") and input_name or ("input " .. (input + 1))
+  state.status = "Recording (" .. input_name .. ")… speak, then Stop and post."
 end
 
 -- Stop the transport, recover the recorded source file, tear down the temp
@@ -1014,40 +1133,70 @@ local function stop_and_post_voice()
   end)
 end
 
+-- Download one stem and drop it on a new track at its timecode. Runs inside a
+-- job coroutine (callers wrap it). Failure statuses are set here; returns true
+-- on success so callers can set their own summary line.
+local function import_stem_now(stem)
+  local http, body = http_get_json("/api/reaper/stems/" .. stem.id .. "/original")
+  if http == 403 then state.status = "This project's owner isn't on a paid plan."; return false end
+  if http ~= 200 then state.status = "Couldn't pull stem (" .. http .. ")."; return false end
+  local data = json_decode(body)
+  if not data or not data.url then state.status = "No download URL returned."; return false end
+
+  -- Prefix with the stem id so imports never collide by filename across
+  -- projects, and re-importing never reuses a path the project still holds open
+  -- (the Windows failure case). #15.
+  local safe_name = safe_filename(data.filename or (tostring(stem.name or "stem") .. ".wav"))
+  local dest = tmp_path(safe_filename(tostring(stem.id)) .. "_" .. safe_name)
+  local dl = http_download(data.url, dest, data.size_bytes or data.sizeBytes)
+  if dl ~= 200 then state.status = "Download failed (" .. dl .. ")."; return false end
+
+  -- The download yielded across frames; the track ops below run synchronously
+  -- in this resume, on the main thread, so REAPER calls are safe here.
+  local idx = reaper.CountTracks(0)
+  reaper.InsertTrackAtIndex(idx, true)
+  local track = reaper.GetTrack(0, idx)
+  reaper.GetSetMediaTrackInfo_String(track, "P_NAME", tostring(stem.name or "Stem"), true)
+  reaper.SetOnlyTrackSelected(track)
+
+  -- Save + restore the edit cursor around the insert so a pull doesn't move the
+  -- user's playhead (the voice-record path restores it too). #28.
+  local saved_cursor = reaper.GetCursorPosition()
+  local offset_ms = jval(data.timecode_offset_ms) or jval(stem.timecode_offset_ms) or 0
+  reaper.SetEditCurPos((offset_ms or 0) / 1000, false, false)
+  reaper.InsertMedia(dest, 0) -- 0 = add to currently selected track at edit cursor
+  reaper.SetEditCurPos(saved_cursor, false, false)
+  reaper.UpdateArrange()
+  state.stem_presence[stem.id] = true
+  return true
+end
+
 local function import_stem(stem)
-  state.status = "Pulling " .. stem.name .. "…"
+  state.status = "Pulling " .. tostring(stem.name or "stem") .. "…"
   start_job(function()
-    local http, body = http_get_json("/api/reaper/stems/" .. stem.id .. "/original")
-    if http == 403 then state.status = "This project's owner isn't on a paid plan."; return end
-    if http ~= 200 then state.status = "Couldn't pull stem (" .. http .. ")."; return end
-    local data = json_decode(body)
-    if not data or not data.url then state.status = "No download URL returned."; return end
+    if import_stem_now(stem) then
+      state.status = "Imported " .. tostring(stem.name or "stem") .. "."
+    end
+  end)
+end
 
-    -- Prefix with the stem id so imports never collide by filename across
-    -- projects, and re-importing never reuses a path the project still holds open
-    -- (the Windows failure case). #15.
-    local safe_name = safe_filename(data.filename or (tostring(stem.name or "stem") .. ".wav"))
-    local dest = tmp_path(safe_filename(tostring(stem.id)) .. "_" .. safe_name)
-    local dl = http_download(data.url, dest)
-    if dl ~= 200 then state.status = "Download failed (" .. dl .. ")."; return end
-
-    -- The download yielded across frames; the track ops below run synchronously
-    -- in this resume, on the main thread, so REAPER calls are safe here.
-    local idx = reaper.CountTracks(0)
-    reaper.InsertTrackAtIndex(idx, true)
-    local track = reaper.GetTrack(0, idx)
-    reaper.GetSetMediaTrackInfo_String(track, "P_NAME", stem.name, true)
-    reaper.SetOnlyTrackSelected(track)
-
-    -- Save + restore the edit cursor around the insert so a pull doesn't move the
-    -- user's playhead (the voice-record path restores it too). #28.
-    local saved_cursor = reaper.GetCursorPosition()
-    local offset_ms = jval(data.timecode_offset_ms) or jval(stem.timecode_offset_ms) or 0
-    reaper.SetEditCurPos((offset_ms or 0) / 1000, false, false)
-    reaper.InsertMedia(dest, 0) -- 0 = add to currently selected track at edit cursor
-    reaper.SetEditCurPos(saved_cursor, false, false)
-    reaper.UpdateArrange()
-    state.status = "Imported " .. stem.name .. "."
+-- Pull every stem that isn't already in the session, one after another in a
+-- single job (the job slot is serial by design).
+local function import_all_stems()
+  refresh_stem_presence()
+  local todo = {}
+  for _, s in ipairs(state.stems) do
+    if s.id and not state.stem_presence[s.id] then todo[#todo + 1] = s end
+  end
+  if #todo == 0 then state.status = "All stems are already in this session."; return end
+  start_job(function()
+    local done = 0
+    for n, s in ipairs(todo) do
+      state.status = "Pulling " .. tostring(s.name or "stem") .. " (" .. n .. "/" .. #todo .. ")…"
+      if not import_stem_now(s) then break end -- its status already says what failed
+      done = done + 1
+    end
+    if done == #todo then state.status = "Imported " .. done .. " stem(s)." end
   end)
 end
 
@@ -1276,6 +1425,33 @@ local function draw_comment_item(c)
   reaper.ImGui_Separator(ctx)
 end
 
+-- One line describing the in-flight transfer. Downloads report the growing
+-- file size (plus a percentage when the total is known); uploads parse the
+-- last percentage curl's progress bar wrote to its stderr file.
+local function transfer_progress_text()
+  local t = state.transfer
+  if not t then return nil end
+  if t.kind == "down" then
+    local got = file_size(t.path)
+    if t.total and t.total > 0 then
+      return string.format("%d%% (%s of %s)",
+        math.min(100, math.floor(got * 100 / t.total)), fmt_bytes(got), fmt_bytes(t.total))
+    end
+    return fmt_bytes(got) .. " received"
+  end
+  local f = io.open(t.prog, "rb")
+  if f then
+    local size = f:seek("end") or 0
+    f:seek("set", math.max(0, size - 400))
+    local tail = f:read("*a") or ""
+    f:close()
+    local pct
+    for p in tail:gmatch("([%d%.]+)%%") do pct = p end
+    if pct then return pct .. "% of " .. fmt_bytes(t.total) end
+  end
+  return fmt_bytes(t.total) .. " to send"
+end
+
 local function draw_status()
   if state.status == "" then return end
   local color = COLORS.muted
@@ -1292,8 +1468,10 @@ local function draw_status()
   end
 
   reaper.ImGui_Spacing(ctx)
-  if reaper.ImGui_BeginChild(ctx, "status", 0, 44) then
+  local progress = transfer_progress_text()
+  if reaper.ImGui_BeginChild(ctx, "status", 0, progress and 58 or 44) then
     reaper.ImGui_TextColored(ctx, color, state.status)
+    if progress then reaper.ImGui_TextColored(ctx, COLORS.muted, progress) end
   end
   reaper.ImGui_EndChild(ctx)
 end
@@ -1405,6 +1583,30 @@ local function draw_settings()
     state.token = trim(state.token)
     reaper.SetExtState(EXT, "token", state.token, true)
   end
+
+  section_title("Voice memos", "mic input")
+  local n_inputs = reaper.GetNumAudioInputs() or 0
+  if n_inputs == 0 then
+    muted_text("No audio inputs available.")
+  else
+    local cur = state.voice_input or 0
+    if cur < 0 or cur >= n_inputs then cur = 0 end
+    local function input_label(i)
+      local nm = reaper.GetInputChannelName(i)
+      return (i + 1) .. ": " .. ((nm and nm ~= "") and nm or "Input " .. (i + 1))
+    end
+    reaper.ImGui_SetNextItemWidth(ctx, content_width())
+    if reaper.ImGui_BeginCombo(ctx, "##voice_input", input_label(cur)) then
+      for i = 0, n_inputs - 1 do
+        if reaper.ImGui_Selectable(ctx, input_label(i) .. "##vi" .. i, i == cur) then
+          state.voice_input = i
+          reaper.SetExtState(EXT, "voice_input", tostring(i), true)
+        end
+      end
+      reaper.ImGui_EndCombo(ctx)
+    end
+  end
+
   if primary_button("Done", content_width()) then state.show_settings = false; start_job(load_projects) end
 end
 
@@ -1442,11 +1644,20 @@ local function draw_project()
   if #state.stems == 0 then
     empty_state("No stems in this project yet.")
   else
+    if reaper.time_precise() > (state.presence_next or 0) then
+      refresh_stem_presence()
+      state.presence_next = reaper.time_precise() + 2
+    end
+    if reaper.ImGui_Button(ctx, "Import all") then import_all_stems() end
     if reaper.ImGui_BeginChild(ctx, "stem_list", 0, 128) then
-      for _, s in ipairs(state.stems) do
-        reaper.ImGui_TextWrapped(ctx, s.name)
+      for si, s in ipairs(state.stems) do
+        reaper.ImGui_TextWrapped(ctx, tostring(s.name or "Stem"))
         reaper.ImGui_SameLine(ctx)
-        if reaper.ImGui_Button(ctx, "Import##" .. s.id) then import_stem(s) end
+        if s.id and state.stem_presence[s.id] then
+          muted_text("(in session)")
+          reaper.ImGui_SameLine(ctx)
+        end
+        if reaper.ImGui_Button(ctx, "Import##" .. tostring(s.id or si)) then import_stem(s) end
       end
     end
     reaper.ImGui_EndChild(ctx)
@@ -1505,11 +1716,34 @@ local function loop()
     if not ok then
       state.status = "Operation failed: " .. tostring(err)
       state.job = nil
+      state.transfer = nil -- a job that died mid-transfer must not leave the progress line stuck
     elseif coroutine.status(state.job) == "dead" then
       state.job = nil
+      state.transfer = nil
     end
   end
   if state.pairing then poll_pairing() end
+
+  -- Once per launch, when the job slot is free: is a newer Take on ReaPack?
+  if not state.update_checked and not state.job then
+    state.update_checked = true
+    start_job(check_for_update)
+  end
+
+  -- Live comments: quietly re-pull the thread every 30s while a project is
+  -- open, so collaborator feedback shows up without touching Refresh. Skipped
+  -- whenever the job slot is busy or a recording/pairing is in flight.
+  if state.view == "project" and state.project and not state.show_settings
+      and not state.job and not state.recording and not state.pairing then
+    local now = reaper.time_precise()
+    if state.comments_next_poll == 0 then
+      state.comments_next_poll = now + 30
+    elseif now > state.comments_next_poll then
+      state.comments_next_poll = now + 30
+      start_job(function() load_comments(true) end)
+    end
+  end
+
   reaper.ImGui_SetNextWindowSize(ctx, 450, 700, reaper.ImGui_Cond_FirstUseEver())
   reaper.ImGui_SetNextWindowSizeConstraints(ctx, 360, 480, -1, -1)
   local visible, open = reaper.ImGui_Begin(ctx, "Take", true)
@@ -1519,6 +1753,13 @@ local function loop()
     muted_text(state.recording and "recording voice memo" or "Reaper collaboration panel")
     if reaper.ImGui_Button(ctx, state.show_settings and "Close settings" or "Settings") then
       state.show_settings = not state.show_settings
+    end
+
+    if state.update_available then
+      reaper.ImGui_TextColored(ctx, COLORS.coral,
+        "Take v" .. state.update_available .. " is out - ReaPack > Synchronize packages.")
+      reaper.ImGui_SameLine(ctx)
+      if reaper.ImGui_SmallButton(ctx, "Dismiss") then state.update_available = nil end
     end
 
     if state.show_settings then
