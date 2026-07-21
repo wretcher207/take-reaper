@@ -6,6 +6,10 @@
         <description><![CDATA[Take — the layer between your DAW and the people you make music with.]]></description>
         <link rel="website">https://takeaudio.com</link>
       </metadata>
+      <version name="0.6.8" author="Dead Pixel Design" time="2026-07-21T12:00:00Z">
+        <changelog><![CDATA[Security and reliability pass. Server-provided URLs and filenames are validated/scrubbed before they ever reach a shell command, closing a command-injection hole reachable through a hostile stem filename or a malicious server URL. Every HTTP request now uses its own temp file, so overlapping requests (e.g. a refresh during an upload) can no longer corrupt each other's responses. Loading projects, opening a project, refreshing/posting comments, and Connect now run in the background like pushes — no more UI freeze on a slow network. Emoji and other non-BMP characters in comments decode correctly (UTF-16 surrogate pairs). JSON nulls from the server are dropped at decode time so they can never surface as raw tables in the UI. Record voice memo refuses to fire while the transport is playing or recording (it would have stopped your real take) or while a transfer is in flight (the memo would have been silently lost).]]></changelog>
+        <source main="main">https://takeaudio.com/reaper/Take.lua</source>
+      </version>
       <version name="0.6.7" author="Dead Pixel Design" time="2026-06-11T22:00:00Z">
         <changelog><![CDATA[Fix ImGui_EndChild assertion crash on newer ReaImGui builds. All child windows (project list, stem list, comment list, status bar, and empty-state placeholders) now always call EndChild regardless of whether the child has visible area — this matches the Dear ImGui convention required by ReaImGui 0.9+. No behavior change on normal-sized panels; eliminates the assert that fired when a child had no visible area.]]></changelog>
         <source main="main">https://takeaudio.com/reaper/Take.lua</source>

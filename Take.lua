@@ -1,5 +1,5 @@
 -- @description Take for Reaper
--- @version 0.6.7
+-- @version 0.6.8
 -- @author Dead Pixel Design
 -- @about
 --   A docked panel that connects this Reaper session to your Take projects.
@@ -71,11 +71,11 @@ local MIME = {
 -- --------------------------------------------------------------------------
 local JSON_NULL = {} -- sentinel for JSON null; distinct from Lua nil to keep arrays dense
 
--- Server JSON nulls decode to JSON_NULL (a truthy table), so `x or default`
--- fallbacks and `if x then` guards on object fields silently keep the null and
--- can do arithmetic on a table → ReaScript error. Route every server-provided
--- field that feeds an `or`-default, a truthiness check, or arithmetic through
--- jval() to collapse the sentinel back to Lua nil at the point of use.
+-- JSON_NULL is a truthy table, so a raw sentinel read would break `x or
+-- default` fallbacks and do arithmetic on a table → ReaScript error. Object
+-- fields are protected at decode time (null-valued keys are dropped, reading
+-- them yields plain nil); JSON_NULL only survives inside arrays, where it keeps
+-- them dense. jval() collapses it back to nil when reading array elements.
 local function jval(v)
   if v == JSON_NULL then return nil end
   return v
@@ -111,17 +111,32 @@ local function json_decode(s)
         elseif e == "u" then
           local hex = s:sub(i + 2, i + 5)
           local cp = tonumber(hex, 16) or 0
+          i = i + 4
+          -- UTF-16 surrogate pair (emoji land here): combine \uD8xx\uDCxx into
+          -- one codepoint, else each half encodes as 3 bytes of mojibake.
+          if cp >= 0xD800 and cp <= 0xDBFF and s:sub(i + 2, i + 3) == "\\u" then
+            local lo = tonumber(s:sub(i + 4, i + 7), 16)
+            if lo and lo >= 0xDC00 and lo <= 0xDFFF then
+              cp = 0x10000 + (cp - 0xD800) * 0x400 + (lo - 0xDC00)
+              i = i + 6
+            end
+          end
           if cp < 0x80 then
             buf[#buf + 1] = string.char(cp)
           elseif cp < 0x800 then
             buf[#buf + 1] = string.char(0xC0 + math.floor(cp / 0x40), 0x80 + (cp % 0x40))
-          else
+          elseif cp < 0x10000 then
             buf[#buf + 1] = string.char(
               0xE0 + math.floor(cp / 0x1000),
               0x80 + (math.floor(cp / 0x40) % 0x40),
               0x80 + (cp % 0x40))
+          else
+            buf[#buf + 1] = string.char(
+              0xF0 + math.floor(cp / 0x40000),
+              0x80 + (math.floor(cp / 0x1000) % 0x40),
+              0x80 + (math.floor(cp / 0x40) % 0x40),
+              0x80 + (cp % 0x40))
           end
-          i = i + 4
         else buf[#buf + 1] = e end
         i = i + 2
       else
@@ -171,7 +186,11 @@ local function json_decode(s)
       skip_ws()
       i = i + 1 -- colon
       skip_ws()
-      obj[key] = parse_value()
+      -- Drop null-valued keys: obj.field reads then behave exactly like a
+      -- missing field (Lua nil), so `or`-defaults and truthiness guards work
+      -- without a jval() at every site. JSON_NULL still pads arrays dense.
+      local val = parse_value()
+      if val ~= JSON_NULL then obj[key] = val end
       skip_ws()
       local c = s:sub(i, i)
       i = i + 1
@@ -333,6 +352,28 @@ end
 -- Single-quote a string so it survives as one argument to `sh -c`.
 local function shq(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
 
+-- Server-provided strings (pre-signed URLs, filenames) end up inside shell
+-- command lines — async jobs literally write them into a .bat/.sh that a shell
+-- executes. Inside the double quotes q() adds, sh still expands $, backticks,
+-- and backslashes, and a control character (newline) would split the script
+-- into a new command on both OSes. So: validate every URL against a strict
+-- shape (legit http(s) URLs never need these characters raw — they arrive
+-- percent-encoded), and scrub filenames down to a safe charset. This closes a
+-- command-injection hole where a hostile collaborator's stem filename, or a
+-- malicious server behind a user-edited base_url, could run arbitrary code.
+local function safe_url(u)
+  u = tostring(u or "")
+  if not u:match("^https?://") then return nil end
+  if u:find("[%s%c\"'`$\\<>|]") then return nil end
+  return u
+end
+
+local function safe_filename(name)
+  name = tostring(name or ""):gsub("[^%w%._%- ()]", "_")
+  if name == "" then name = "file" end
+  return name
+end
+
 -- Remove a directory and everything in it. Used for the per-render temp dirs
 -- (take_render_*), which hold the rendered file plus .reapeaks sidecars and any
 -- secondary-format outputs. EnumerateFiles lists files only, so collect them all
@@ -359,7 +400,7 @@ end
 -- during the current session. Also catches curl resp/req JSON bodies.
 local function cleanup_stale_temps()
   local base = reaper.GetResourcePath() .. "/Scripts/"
-  local prefixes = { "take_render_", "take_voice_", "take_resp.json", "take_req.json", "take_upload_resp.txt", "take_job_" }
+  local prefixes = { "take_render_", "take_voice_", "take_resp", "take_req", "take_upload_resp", "take_job_" }
   for _, prefix in ipairs(prefixes) do
     local i = 0
     while true do
@@ -475,9 +516,18 @@ end
 -- curl exits on its own (writing http_code "000" -> status 0 -> "couldn't reach
 -- the server") instead of ExecProcess returning nil (status -1 -> the wrong
 -- "curl couldn't run" message) while an orphaned curl keeps running.
+-- Each request gets its own numbered req/resp temp file. A single shared
+-- take_resp.json raced: a sync GET (pairing poll, a refresh) landing while an
+-- async job's curl was still writing meant one overwrote the other and the job
+-- read back the wrong body. Files persist until the next startup sweep, which
+-- keeps the read-the-last-response-off-disk debugging trick working.
+local REQ_SEQ = 0
+
 local function http_get_json(path)
-  local out_file = tmp_path("resp.json")
-  local url = state.base_url .. path
+  local url = safe_url(state.base_url .. path)
+  if not url then return 0, "" end
+  REQ_SEQ = REQ_SEQ + 1
+  local out_file = tmp_path("resp_" .. REQ_SEQ .. ".json")
   local cmd = curl_bin() .. " -s --connect-timeout 10 --max-time 18"
     .. " -H " .. q("Authorization: Bearer " .. state.token)
     .. " -o " .. q(out_file)
@@ -488,14 +538,16 @@ local function http_get_json(path)
 end
 
 local function http_post_json(path, tbl)
-  local body_file = tmp_path("req.json")
+  local url = safe_url(state.base_url .. path)
+  if not url then return 0, "" end
+  REQ_SEQ = REQ_SEQ + 1
+  local body_file = tmp_path("req_" .. REQ_SEQ .. ".json")
   local bf = io.open(body_file, "wb")
   if not bf then return 0, "" end
   bf:write(json_encode(tbl))
   bf:close()
 
-  local out_file = tmp_path("resp.json")
-  local url = state.base_url .. path
+  local out_file = tmp_path("resp_" .. REQ_SEQ .. ".json")
   local cmd = curl_bin() .. " -s --connect-timeout 10 --max-time 55 -X POST"
     .. " -H " .. q("Authorization: Bearer " .. state.token)
     .. " -H " .. q("Content-Type: application/json")
@@ -509,6 +561,8 @@ end
 
 -- Download a (pre-signed) URL to dest. Returns http_status.
 local function http_download(url, dest)
+  url = safe_url(url)
+  if not url then return 0 end
   local cmd = curl_bin() .. " -s --connect-timeout 10 --max-time 110 -L -o " .. q(dest)
     .. " -w " .. q("%{http_code}") .. " " .. q(url)
   return http_run(cmd, 120000)
@@ -518,7 +572,10 @@ end
 -- The response body is diverted to a file (-o) so stdout is only the http_code;
 -- otherwise status_from would parse a digit out of the JSON body.
 local function http_upload(url, filepath, content_type)
-  local out_file = tmp_path("upload_resp.txt")
+  url = safe_url(url)
+  if not url then return 0 end
+  REQ_SEQ = REQ_SEQ + 1
+  local out_file = tmp_path("upload_resp_" .. REQ_SEQ .. ".txt")
   local cmd = curl_bin() .. " -s --connect-timeout 10 --max-time 290 -X PUT -T " .. q(filepath)
     .. " -H " .. q("Content-Type: " .. content_type)
     .. " -o " .. q(out_file)
@@ -713,7 +770,10 @@ local function post_comment()
   if state.comment_body == "" or state.comment_body:match("^%s*$") then
     state.status = "Type a comment first."; return
   end
-  local payload = { body = state.comment_body }
+  -- Capture the text now: this runs inside a job, and by the time the POST
+  -- returns the user may have typed a new draft — only clear it if unchanged.
+  local body_text = state.comment_body
+  local payload = { body = body_text }
   -- At the edit cursor -> a timestamp on the current rough (server resolves it).
   if state.comment_at_cursor then
     payload.timestampMs = math.floor((reaper.GetCursorPosition() or 0) * 1000)
@@ -731,7 +791,7 @@ local function post_comment()
   if created and type(created) == "table" and created.id then
     state.comments[#state.comments + 1] = created
   end
-  state.comment_body = ""
+  if state.comment_body == body_text then state.comment_body = "" end
   load_comments()
   -- If the GET came back empty but we just inserted a comment, keep it visible.
   if #state.comments == 0 and created and type(created) == "table" and created.id then
@@ -840,7 +900,7 @@ local function open_voice_memo(c)
     local data = json_decode(body)
     if not data or not data.url then state.status = "No voice memo URL returned."; return end
 
-    local filename = tostring(data.filename or ("voice_" .. comment_key(c) .. ".wav")):gsub("[/\\]", "_")
+    local filename = safe_filename(data.filename or ("voice_" .. comment_key(c) .. ".wav"))
     local dest = tmp_path("voice_" .. filename)
     local dl = http_download(data.url, dest)
     if dl ~= 200 then state.status = "Voice memo download failed (" .. dl .. ")."; return end
@@ -859,6 +919,15 @@ local function start_voice_record()
   if not state.project then state.status = "Open a project first."; return end
   if state.token == "" then state.status = "Add a token in Settings first."; return end
   if state.recording then return end
+  -- Command 1013 TOGGLES transport record: fired while the user is already
+  -- playing or recording it would stop/mangle their real session take. And the
+  -- stop-side upload needs the single job slot, so don't start a memo that
+  -- couldn't be posted.
+  if state.job then state.status = "Busy — finish the current operation first."; return end
+  if (reaper.GetPlayState() or 0) ~= 0 then
+    state.status = "Stop the transport first, then record the memo."
+    return
+  end
 
   local v = {}
   v.cursor = reaper.GetCursorPosition() or 0
@@ -957,8 +1026,8 @@ local function import_stem(stem)
     -- Prefix with the stem id so imports never collide by filename across
     -- projects, and re-importing never reuses a path the project still holds open
     -- (the Windows failure case). #15.
-    local safe_name = (data.filename or (stem.name .. ".wav")):gsub("[/\\]", "_")
-    local dest = tmp_path(stem.id .. "_" .. safe_name)
+    local safe_name = safe_filename(data.filename or (tostring(stem.name or "stem") .. ".wav"))
+    local dest = tmp_path(safe_filename(tostring(stem.id)) .. "_" .. safe_name)
     local dl = http_download(data.url, dest)
     if dl ~= 200 then state.status = "Download failed (" .. dl .. ")."; return end
 
@@ -1248,7 +1317,8 @@ local function start_pairing()
     return
   end
   local ok, data = pcall(json_decode, body)
-  if not ok or type(data) ~= "table" or not data.device_code or not data.verify_url then
+  if not ok or type(data) ~= "table" or not data.device_code
+      or not safe_url(data.verify_url) then
     state.status = "Couldn't start Connect (unexpected response)."
     return
   end
@@ -1295,7 +1365,7 @@ local function poll_pairing()
     reaper.SetExtState(EXT, "token", state.token, true)
     state.show_settings = false
     state.status = "Connected."
-    load_projects()
+    start_job(load_projects)
   elseif data.status == "expired" or data.status == "denied" or data.status == "not-found" then
     state.pairing = nil
     state.status = "Connect failed (" .. tostring(data.status) .. "). Open Settings and try again."
@@ -1324,7 +1394,7 @@ local function draw_settings()
     if reaper.ImGui_Button(ctx, "Cancel") then state.pairing = nil; state.status = "" end
   else
     reaper.ImGui_TextWrapped(ctx, "Click Connect, approve Take in the browser tab that opens, and you're in. No key to copy.")
-    if primary_button("Connect", content_width()) then start_pairing() end
+    if primary_button("Connect", content_width()) then start_job(start_pairing) end
   end
   muted_text("API token (optional)")
   reaper.ImGui_TextWrapped(ctx, "Prefer to paste a key? Create one at " .. DEFAULT_BASE_URL .. "/settings/reaper and paste the full take_ token here. Connect above is easier.")
@@ -1335,12 +1405,15 @@ local function draw_settings()
     state.token = trim(state.token)
     reaper.SetExtState(EXT, "token", state.token, true)
   end
-  if primary_button("Done", content_width()) then state.show_settings = false; load_projects() end
+  if primary_button("Done", content_width()) then state.show_settings = false; start_job(load_projects) end
 end
 
 local function draw_projects()
   section_title("Projects", #state.projects > 0 and (#state.projects .. " available") or "")
-  if primary_button("Refresh projects", content_width()) then load_projects() end
+  -- All network-touching buttons run through start_job so a slow server never
+  -- freezes REAPER's UI (the 0.6.6 fix covered pushes/pulls; this covers the
+  -- rest). start_job itself reports "Busy" if a transfer is already running.
+  if primary_button("Refresh projects", content_width()) then start_job(load_projects) end
   if state.token == "" then
     empty_state("Add your token in Settings to load paid projects.")
     return
@@ -1352,8 +1425,8 @@ local function draw_projects()
 
   if reaper.ImGui_BeginChild(ctx, "project_list", 0, 220) then
     for i, p in ipairs(state.projects) do
-      local label = tostring(i) .. ". " .. p.name .. "##" .. p.id
-      if reaper.ImGui_Selectable(ctx, label) then open_project(p) end
+      local label = tostring(i) .. ". " .. tostring(p.name or "Untitled") .. "##" .. tostring(p.id or i)
+      if reaper.ImGui_Selectable(ctx, label) then start_job(function() open_project(p) end) end
     end
   end
   reaper.ImGui_EndChild(ctx)
@@ -1386,7 +1459,7 @@ local function draw_project()
   if primary_button("Push selected track", content_width()) then push_stem() end
 
   section_title("Comments", #state.comments > 0 and (#state.comments .. " in this project") or "")
-  if reaper.ImGui_Button(ctx, "Refresh comments") then load_comments() end
+  if reaper.ImGui_Button(ctx, "Refresh comments") then start_job(load_comments) end
   if #state.comments > 0 then
     if reaper.ImGui_Button(ctx, "Drop timeline markers") then sync_comment_markers() end
     reaper.ImGui_SameLine(ctx)
@@ -1413,7 +1486,7 @@ local function draw_project()
   changed, state.comment_body = reaper.ImGui_InputText(ctx, "New comment", state.comment_body)
   local cursor_label = "At edit cursor @" .. fmt_ts(math.floor((reaper.GetCursorPosition() or 0) * 1000))
   changed, state.comment_at_cursor = reaper.ImGui_Checkbox(ctx, cursor_label, state.comment_at_cursor)
-  if primary_button("Post comment") then post_comment() end
+  if primary_button("Post comment") then start_job(post_comment) end
   reaper.ImGui_SameLine(ctx)
   if state.recording then
     if reaper.ImGui_Button(ctx, "Stop and post voice memo") then stop_and_post_voice() end
