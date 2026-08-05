@@ -1,5 +1,25 @@
 # MEMORY — Take for Reaper (decision log)
 
+## 2026-08-05 — 0.8.1: first live Windows run; smoke test passed (minus proposals)
+
+- **Smoke-tested 0.6.8+0.7.0+0.8.0 live** on Windows 11 / REAPER 7.78 /
+  ReaImGui 0.10.0.5 — pairing, projects, stem push with progress, Import all,
+  comments + 30s auto-refresh, voice memo: all passed. Cut/loop proposals still
+  untested: migration 0028 is not yet applied to prod (blocked on Supabase
+  dashboard access; the MCP connector on this machine only holds the Holler
+  account).
+- **Two Windows-only bugs found and fixed as 0.8.1** (full stories in
+  ERRORS.md): the detached curl .bat never ran (positive ExecProcess timeout
+  kills the child + cmd `move` rejects forward slashes), and the EndChild
+  convention flipped again in ReaImGui 0.10.
+- **Decided: EndChild convention is resolved at runtime**, not hardcoded —
+  `end_child(visible)` picks guarded vs unconditional from the installed
+  ReaImGui version, ending the 0.5.1/0.6.7 flip-flop.
+- **Decided: probe the live instance instead of theorizing** —
+  `reaper.exe -nonewinst <script.lua>` executes a script in the running REAPER;
+  all four Windows bugs were pinned this way in one session with David clicking
+  nothing.
+
 ## 2026-07-21 — Review sweep: 0.6.8 + 0.7.0 + 0.8.0 staged, unpublished
 
 - **Three versions committed, none published or live-tested.** See `HANDOFF.md`

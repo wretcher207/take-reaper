@@ -1,5 +1,5 @@
 -- @description Take for Reaper
--- @version 0.8.0
+-- @version 0.8.1
 -- @author Dead Pixel Design
 -- @about
 --   A docked panel that connects this Reaper session to your Take projects.
@@ -37,6 +37,25 @@ end)()
 -- Seed math.random (render temp-dir suffixes). Unseeded Lua repeats the same
 -- sequence every REAPER launch, so two same-second pushes could collide.
 math.randomseed(os.time())
+
+-- ReaImGui 0.10 changed BeginChild's contract AGAIN: a false return now means
+-- no child window was pushed, and calling EndChild anyway asserts
+-- ("child_window->Flags & ImGuiWindowFlags_ChildWindow") and destroys the whole
+-- ImGui context (verified live on 0.10.0.5, 2026-08-05 — the status child gets
+-- fully clipped mid-upload when the progress line reflows the layout). On 0.9
+-- the contract was the opposite — EndChild must ALWAYS be called, even after a
+-- false BeginChild (the 0.6.7 fix, MEMORY 2026-06-11). Both users exist in the
+-- wild, so pick the convention once from the running ReaImGui's own version and
+-- route every child through end_child(visible).
+local END_CHILD_ALWAYS = (function()
+  local _, _, rv = reaper.ImGui_GetVersion()
+  local maj, min = tostring(rv or ""):match("^(%d+)%.(%d+)")
+  maj, min = tonumber(maj) or 0, tonumber(min) or 0
+  return maj == 0 and min < 10
+end)()
+local function end_child(visible)
+  if visible or END_CHILD_ALWAYS then reaper.ImGui_EndChild(ctx) end
+end
 
 local function trim(s)
   return tostring(s or ""):match("^%s*(.-)%s*$")
@@ -500,19 +519,29 @@ local function http_run(cmd, timeout_ms, progress_file)
   local done = tmp_path("job_" .. jid .. ".done")
   -- Normally curl's stderr is discarded; a caller showing upload progress
   -- passes progress_file so the panel can read the meter back mid-transfer.
-  local stderr_win = progress_file and q(progress_file) or "nul"
   local stderr_sh = progress_file and q(progress_file) or "/dev/null"
   local script
   if IS_WIN then
     -- In a .bat a literal % must be doubled, so curl's "%{http_code}" needs
     -- escaping that the command-line (sync) path doesn't. The atomic rename
     -- (move) is the completion signal: `done` only appears once curl finished.
+    -- Three Windows-only constraints, each fatal alone (found 2026-08-05, the
+    -- first live Windows run):
+    --   * ExecProcess with a positive timeout KILLS the child when it expires,
+    --     and 10ms is shorter than cmd.exe's startup, so the batch never ran.
+    --     A negative timeout is REAPER's real fire-and-forget.
+    --   * cmd's built-ins (move) reject forward-slash paths, so every path the
+    --     batch touches is backslashed (io.open on our side takes either).
+    --   * cmd.exe by absolute path — same PATH-resolution defense as curl_bin.
+    local bs = function(p) return (p:gsub("/", "\\")) end
+    local stderr_bat = progress_file and q(bs(progress_file)) or "nul"
     script = tmp_path("job_" .. jid .. ".bat")
     write_file(script,
       "@echo off\r\n" ..
-      cmd:gsub("%%", "%%%%") .. " > " .. q(code_tmp) .. " 2>" .. stderr_win .. "\r\n" ..
-      "move /y " .. q(code_tmp) .. " " .. q(done) .. " >nul 2>nul\r\n")
-    reaper.ExecProcess('cmd /c start "" /b cmd /c ' .. q(script), 10)
+      cmd:gsub("%%", "%%%%") .. " > " .. q(bs(code_tmp)) .. " 2>" .. stderr_bat .. "\r\n" ..
+      "move /y " .. q(bs(code_tmp)) .. " " .. q(bs(done)) .. " >nul 2>nul\r\n")
+    local cmdexe = (os.getenv("SystemRoot") or "C:\\Windows") .. "\\System32\\cmd.exe"
+    reaper.ExecProcess(cmdexe .. ' /c start "" /b cmd /c ' .. q(bs(script)), -2)
   else
     script = tmp_path("job_" .. jid .. ".sh")
     write_file(script,
@@ -1470,10 +1499,11 @@ local function muted_text(text)
 end
 
 local function empty_state(text)
-  if reaper.ImGui_BeginChild(ctx, "empty_" .. text, 0, 48) then
+  local vis = reaper.ImGui_BeginChild(ctx, "empty_" .. text, 0, 48)
+  if vis then
     muted_text(text)
   end
-  reaper.ImGui_EndChild(ctx)
+  end_child(vis)
 end
 
 local function primary_button(label, width)
@@ -1565,11 +1595,12 @@ local function draw_status()
 
   reaper.ImGui_Spacing(ctx)
   local progress = transfer_progress_text()
-  if reaper.ImGui_BeginChild(ctx, "status", 0, progress and 58 or 44) then
+  local vis = reaper.ImGui_BeginChild(ctx, "status", 0, progress and 58 or 44)
+  if vis then
     reaper.ImGui_TextColored(ctx, color, state.status)
     if progress then reaper.ImGui_TextColored(ctx, COLORS.muted, progress) end
   end
-  reaper.ImGui_EndChild(ctx)
+  end_child(vis)
 end
 
 -- One-click Connect (the OAuth device grant). Ask the server for a pairing, open
@@ -1721,13 +1752,14 @@ local function draw_projects()
     return
   end
 
-  if reaper.ImGui_BeginChild(ctx, "project_list", 0, 220) then
+  local vis = reaper.ImGui_BeginChild(ctx, "project_list", 0, 220)
+  if vis then
     for i, p in ipairs(state.projects) do
       local label = tostring(i) .. ". " .. tostring(p.name or "Untitled") .. "##" .. tostring(p.id or i)
       if reaper.ImGui_Selectable(ctx, label) then start_job(function() open_project(p) end) end
     end
   end
-  reaper.ImGui_EndChild(ctx)
+  end_child(vis)
 end
 
 local function draw_project()
@@ -1745,7 +1777,8 @@ local function draw_project()
       state.presence_next = reaper.time_precise() + 2
     end
     if reaper.ImGui_Button(ctx, "Import all") then import_all_stems() end
-    if reaper.ImGui_BeginChild(ctx, "stem_list", 0, 128) then
+    local vis = reaper.ImGui_BeginChild(ctx, "stem_list", 0, 128)
+    if vis then
       for si, s in ipairs(state.stems) do
         reaper.ImGui_TextWrapped(ctx, tostring(s.name or "Stem"))
         reaper.ImGui_SameLine(ctx)
@@ -1756,7 +1789,7 @@ local function draw_project()
         if reaper.ImGui_Button(ctx, "Import##" .. tostring(s.id or si)) then import_stem(s) end
       end
     end
-    reaper.ImGui_EndChild(ctx)
+    end_child(vis)
   end
 
   section_title("Push stem", "selected track")
@@ -1794,7 +1827,8 @@ local function draw_project()
   if #state.comments == 0 then
     empty_state("No comments yet.")
   else
-    if reaper.ImGui_BeginChild(ctx, "comment_list", 0, 220) then
+    local vis = reaper.ImGui_BeginChild(ctx, "comment_list", 0, 220)
+    if vis then
       for _, c in ipairs(state.comments) do
         draw_comment_item(c)
       end
@@ -1803,7 +1837,7 @@ local function draw_project()
         state.scroll_comments = false
       end
     end
-    reaper.ImGui_EndChild(ctx)
+    end_child(vis)
   end
   reaper.ImGui_SetNextItemWidth(ctx, content_width())
   changed, state.comment_body = reaper.ImGui_InputText(ctx, "New comment", state.comment_body)

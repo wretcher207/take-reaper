@@ -2,7 +2,18 @@
 
 Cold start for a new session. Read this first, then `LEARNINGS.md` / `ERRORS.md` / `MEMORY.md` before touching anything.
 
-## State as of 2026-07-21
+## State as of 2026-08-05
+
+**Smoke test PASSED** on Windows 11 / REAPER 7.78 / ReaImGui 0.10.0.5 — pairing,
+projects, stem push (with upload progress), Import all, comments + 30s
+auto-refresh, voice memo all verified live. Two Windows-only bugs were found and
+fixed as **0.8.1** (ExecProcess detached-curl launch + ReaImGui 0.10 EndChild
+contract — see ERRORS.md 2026-08-05, both entries). Still outstanding before
+publish: apply migration 0028 to prod Supabase (dashboard paste — this machine's
+Supabase MCP only holds the Holler account), live-test a cut/loop proposal, then
+`publish.bat`.
+
+## Pre-0.8.1 state (2026-07-21)
 
 Three unreleased versions are committed locally and **none are published or smoke-tested in live REAPER**:
 

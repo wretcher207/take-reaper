@@ -2,6 +2,45 @@
 
 Approaches that took more than 2 attempts. Check before retrying similar tasks.
 
+## 2026-08-05 — Windows async curl: detached .bat never ran (two stacked causes)
+
+- **What didn't work:** Assuming the 0.6.6 detached-transfer design was portable.
+  On its first-ever Windows run, every network button returned http == -1
+  ("curl couldn't run"). Fixing the paths alone didn't help; fixing the launcher
+  alone didn't help. Four live probes (`reaper.exe -nonewinst probe.lua` against
+  the running instance) isolated the causes.
+- **What worked (both required):** (a) `reaper.ExecProcess` with a **positive**
+  timeout KILLS the child when it expires — 10ms is shorter than cmd.exe's
+  startup, so the batch never launched; a **negative** timeout is REAPER's real
+  fire-and-forget. `/bin/sh` on macOS forks within 10ms, which is why the Mac
+  never saw this. (b) cmd's built-ins (`move`) reject the forward-slash paths
+  `tmp_path` produces — everything the .bat touches must be backslashed. The
+  `rmdir` call at cleanup already knew this; `http_run` didn't.
+- **Next time:** ExecProcess fire-and-forget = negative timeout, never a tiny
+  positive one. Any path handed to a cmd built-in gets `:gsub("/", "\\")`. And
+  `reaper.exe -nonewinst <script.lua>` runs a probe inside the live instance —
+  the fastest way to test ExecProcess behavior for real.
+
+## 2026-08-05 — The EndChild assert is VERSION-DEPENDENT; both prior "fixes" were era-specific
+
+- **What didn't work:** Treating either convention as universal. The guarded
+  `if BeginChild then ... EndChild end` (0.5.1, re-affirmed below on 2026-06-09)
+  asserts on ReaImGui 0.9. The unconditional EndChild (0.6.7 fix) asserts on
+  ReaImGui 0.10+ — `BeginChild == false` no longer pushes a child, EndChild then
+  fails `child_window->Flags & ImGuiWindowFlags_ChildWindow` AND destroys the
+  ImGui context (the panel dies, not just one frame). Trigger in practice: the
+  status child gets fully clipped when the upload progress line reflows the
+  layout — so it only crashed mid-transfer.
+- **What worked:** Resolve the convention ONCE at startup from
+  `select(3, reaper.ImGui_GetVersion())` (returns the ReaImGui version, e.g.
+  "0.10.0.5") and route all five child sites through `end_child(visible)`:
+  guarded on >= 0.10, unconditional on 0.9.x. Verified live on 0.10.0.5.
+- **Next time:** Before "fixing" a Begin/End pairing assert, write a 10-line
+  probe that clips a child to zero and logs `BeginChild`'s return + whether
+  `EndChild` throws, on the installed ReaImGui. The two entries below this one
+  in the log flip-flopped on the same assert because neither checked which
+  contract the running binary actually enforced.
+
 ## 2026-06-09 — ReaPack "Could not resolve host: Take.lua" misread as DNS
 
 - **What didn't work:** Treating the error as a network/DNS problem. That led to
