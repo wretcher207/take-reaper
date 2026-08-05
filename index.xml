@@ -6,6 +6,10 @@
         <description><![CDATA[Take — the layer between your DAW and the people you make music with.]]></description>
         <link rel="website">https://takeaudio.com</link>
       </metadata>
+      <version name="0.8.1" author="Dead Pixel Design" time="2026-08-05T05:30:00Z">
+        <changelog><![CDATA[Windows fixes. Network operations work on Windows again: the background transfer mechanism introduced in 0.6.6 never actually launched on Windows (every button reported "curl couldn't run from REAPER"), and uploads could crash the panel outright on ReaImGui 0.10 or newer when the progress line appeared. Both are fixed — pushes, pulls, Connect, comments, and voice memos are verified working on Windows (REAPER 7.78, ReaImGui 0.10). The panel now also adapts to the installed ReaImGui version's child-window rules, so both 0.9 and 0.10+ users get a stable UI. No functional changes on macOS.]]></changelog>
+        <source main="main">https://takeaudio.com/reaper/Take.lua</source>
+      </version>
       <version name="0.8.0" author="Dead Pixel Design" time="2026-07-21T16:00:00Z">
         <changelog><![CDATA[Cut and loop proposals, from inside REAPER. Make a time selection, optionally type a note, and hit Propose cut or Propose loop (with a x2-x8 repeat count) — the proposal lands on the project's current rough as a comment with the selected range attached, exactly like proposals made on the web. Proposals in the comment list show as CUT or LOOP lanes with their range; Select sets your time selection to the proposed range (turn on Repeat to audition a loop), and Region drops a spanning REAPER region. Drop timeline markers now creates regions for proposals and points for plain comments, and Clear Take markers removes both. Requires the matching takeaudio.com update; older servers return an error and nothing is posted.]]></changelog>
         <source main="main">https://takeaudio.com/reaper/Take.lua</source>
