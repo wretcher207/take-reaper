@@ -2,46 +2,59 @@
 
 Cold start for a new session. Read this first, then `LEARNINGS.md` / `ERRORS.md` / `MEMORY.md` before touching anything.
 
-## State as of 2026-08-05
+## State as of 2026-08-05 — v0.8.1 SHIPPED
 
-**Smoke test PASSED** on Windows 11 / REAPER 7.78 / ReaImGui 0.10.0.5 — pairing,
-projects, stem push (with upload progress), Import all, comments + 30s
-auto-refresh, voice memo all verified live. Two Windows-only bugs were found and
-fixed as **0.8.1** (ExecProcess detached-curl launch + ReaImGui 0.10 EndChild
-contract — see ERRORS.md 2026-08-05, both entries). Still outstanding before
-publish: apply migration 0028 to prod Supabase (dashboard paste — this machine's
-Supabase MCP only holds the Holler account), live-test a cut/loop proposal, then
-`publish.bat`.
+**v0.8.1 is published and verified live** at `takeaudio.com/reaper/index.xml`.
+The whole July 21 backlog went out in one release: 0.6.8 (security), 0.7.0
+(QoL), 0.8.0 (cut/loop proposals), 0.8.1 (Windows fixes). The full smoke test
+passed live on Windows 11 / REAPER 7.78 / ReaImGui 0.10.0.5 — pairing, projects,
+stem push with upload progress, Import all, comments + 30s auto-refresh, voice
+memo, and cut/loop proposals end to end. Migration 0028 is applied to prod
+Supabase (David, via dashboard — this machine's Supabase MCP only holds the
+Holler account, not Take's). Web app deployed via GitHub→Vercel auto-deploy
+(commit `b4e767b` in the take repo).
 
-## Pre-0.8.1 state (2026-07-21)
+Two Windows-only bugs were found on the panel's first-ever Windows run and fixed
+as 0.8.1 — the detached-curl launch (ExecProcess positive-timeout kill + cmd
+`move` vs forward slashes) and the ReaImGui 0.10 EndChild contract flip. Full
+stories with the "next time" lessons in **ERRORS.md 2026-08-05** (both entries).
+The debugging technique that cracked them: `reaper.exe -nonewinst <probe.lua>`
+runs a script inside the already-running REAPER instance.
 
-Three unreleased versions are committed locally and **none are published or smoke-tested in live REAPER**:
+**Nothing is stranded.** Both repos clean and pushed: take-reaper `693a7aa`,
+take `b4e767b`.
 
-| Version | Commit | What |
-| --- | --- | --- |
-| 0.6.8 | `5f1fbf9` | Security/reliability: `safe_url`/`safe_filename` sanitizers close a shell-injection hole (server strings were written into the async `.bat`/`.sh` curl scripts); unique per-request temp files (fixes a response-clobber race); JSON nulls dropped at decode (no more truthy-table crashes); UTF-16 surrogate pairs (emoji) decode correctly; every network button is async via the job system; voice record guarded against a rolling transport. |
-| 0.7.0 | `5552526` | QoL: live transfer progress (uploads parse curl's `-#` meter from a stderr file, downloads poll file size); comments auto-refresh every 30s with new-comment notice; Import all + "(in session)" stem labels; voice-memo input picker in Settings; once-per-launch update nudge from the ReaPack index; `tools/check.js` test harness wired into both publish scripts. |
-| 0.8.0 | `0437bb0` | Cut/loop proposals: Propose section posts a cut or loop (x2–x8) from REAPER's time selection to the current rough; proposals render as CUT/LOOP lanes with Select (time selection) and Region actions; marker sync creates regions for proposals. **Requires the take repo's server changes below.** |
+## Ship checklist for the NEXT release (order matters, all steps verified 2026-08-05)
 
-Server side lives in the sibling `take` repo (public, cloned at `../take`), commit `583fa4a`:
-migration `supabase/migrations/20260721120000_0028_reaper_cut_loop_proposals.sql` (extends `reaper_project_comments` with `proposal_*` fields, adds `reaper_create_proposal` RPC), route `apps/web/src/app/api/reaper/projects/[id]/proposals/route.ts`, types in `packages/shared/src/db.ts`. `pnpm -r typecheck` and all unit tests pass.
-
-## Ship checklist (order matters)
-
-1. **Smoke-test in live REAPER first** — three versions of changes, zero live testing. Click through: load projects, open one, push a stem (watch the upload percentage), Import all, post a comment, let the panel idle 30+ seconds (comment auto-refresh), record a voice memo with a non-default input, propose a cut from a time selection.
-2. **Apply migration 0028 to prod Supabase** before the web app deploys — the comments GET RPC is dropped/recreated with a new return type. Paste the SQL in the dashboard, or `supabase db push` (may first need `supabase migration repair --status applied 20260608210000` — see MEMORY.md 2026-06-08).
-3. **Deploy take**: push + `vercel --prod --yes` from the take repo root. Commit author must be `davidrussell112688@gmail.com` or Vercel Hobby marks the build BLOCKED (take/CLAUDE.md gotcha) — the existing commits are authored correctly.
-4. **Publish the panel**: run `publish.bat` here. It now runs `tools/check.js` (auto-installs npm deps) before shipping, copies Take.lua + index.xml into the take repo, deploys, and verifies takeaudio.com.
+1. **Smoke-test in live REAPER** — load projects, open one, push a stem (watch
+   the upload percentage), Import all, post a comment, idle 30+ seconds
+   (comment auto-refresh), voice memo on a non-default input, propose a cut.
+2. **If there's a new migration, apply it to prod Supabase first** (dashboard
+   paste; `supabase db push` may need
+   `supabase migration repair --status applied 20260608210000` — MEMORY.md
+   2026-06-08). Note the Vercel GitHub integration auto-deploys on ANY push to
+   take's main — a push can leapfrog an unapplied migration, so apply before
+   pushing server code that needs it.
+3. **Bump `-- @version` in Take.lua AND add the matching
+   `<version name="X.Y.Z">` block to index.xml** — publish.bat refuses to run
+   without the index block.
+4. **Run `publish.bat`** — runs tools/check.js, copies Take.lua + index.xml into
+   the take repo (both locations), pushes both repos, verifies takeaudio.com.
+   No vercel CLI on this box; the take push auto-deploys production anyway, so
+   the script's immediate verify may warn — re-check the live index a minute
+   later. Commit author must be `davidrussell112688@gmail.com` or Vercel Hobby
+   blocks the build (repo-local git identity already set in both repos).
 
 ## Testing without REAPER
 
 `node tools/check.js` — luaparse syntax check on all of Take.lua, plus behavioral tests for the pure-Lua blocks (JSON codec incl. null-drop and surrogate pairs, `safe_url`/`safe_filename` injection cases, `fmt_bytes`, `version_newer`) running in a real Lua 5.4 VM (wasmoon). The carve markers are comment lines in Take.lua — if you rename those comments, update `tools/check.js`.
 
-## Watch-list for the smoke test
+## Testing WITH REAPER (without clicking)
 
-- Upload progress: newest mechanism — curl `-#` stderr redirected to a `take_prog_*` file, tail-parsed each frame. If no percentage shows, the transfer still works; the fallback line shows total size only.
-- Voice input picker on a real audio device (`GetInputChannelName` labels).
-- The 30s comment auto-refresh should never fire while a transfer/recording/pairing is running (guarded in `loop()`).
+`& "C:\Program Files\REAPER (x64)\reaper.exe" -nonewinst <script.lua>` executes
+a ReaScript inside the running instance — write results to a temp file and read
+them back. This is how the 2026-08-05 Windows bugs were isolated. ExecProcess
+gotchas live in ERRORS.md.
 
 ## Candidate next slices
 
@@ -51,4 +64,7 @@ Pull-the-rough onto a muted reference track (A/B against the current mix — nat
 
 - No Lua toolchain; Node v24 present — hence the wasmoon harness.
 - Git identity is repo-local only in both repos (`David Russell <davidrussell112688@gmail.com>`).
-- `gh` CLI is not authenticated; pushes rely on stored git credentials.
+- `gh` CLI auth: user-level GH_TOKEN env var works for pushes/API.
+- ReaImGui here is 0.10.0.5 — the panel's `end_child()` picks the right
+  BeginChild/EndChild convention per version; don't "simplify" it back to one
+  convention (see ERRORS.md, the flip-flop history).
