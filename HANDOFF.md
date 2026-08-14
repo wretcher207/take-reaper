@@ -1,3 +1,5 @@
+> status: active | one-liner: Take REAPER panel v0.8.1 published and verified live on Windows | next: unknown
+
 # HANDOFF — Take for Reaper
 
 Cold start for a new session. Read this first, then `LEARNINGS.md` / `ERRORS.md` / `MEMORY.md` before touching anything.
