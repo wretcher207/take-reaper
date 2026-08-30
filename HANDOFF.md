@@ -1,4 +1,4 @@
-> status: active | one-liner: Take REAPER panel v0.8.1 published and verified live on Windows | next: unknown
+> status: shipped, nothing in flight | one-liner: Take REAPER panel v0.8.1 published and verified live on Windows | next: David picks a slice, none are started. The candidates the doc names are pull-the-rough onto a muted reference track, batch stem push, time-selection-bounded rough push, and two-way marker sync.
 
 # HANDOFF — Take for Reaper
 
