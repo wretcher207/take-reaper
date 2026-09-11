@@ -1,4 +1,4 @@
-> status: shipped, nothing in flight | one-liner: Take REAPER panel v0.8.1 published and verified live on Windows | next: David picks a slice, none are started. The candidates the doc names are pull-the-rough onto a muted reference track, batch stem push, time-selection-bounded rough push, and two-way marker sync.
+> status: v0.8.1 shipped; v0.9.0 scoped and approved | one-liner: Take REAPER panel v0.8.1 published and verified live on Windows | next: build the four approved v0.9.0 features in the order below. David approved all four on 2026-09-11, so the old "David picks a slice" question is answered and closed. Start with pull-the-rough.
 
 # HANDOFF — Take for Reaper
 
@@ -61,6 +61,49 @@ gotchas live in ERRORS.md.
 ## Candidate next slices
 
 Pull-the-rough onto a muted reference track (A/B against the current mix — natural companion to proposals), batch stem push (all selected tracks), time-selection-bounded rough push, two-way marker sync (REAPER markers with a prefix → Take comments).
+
+## v0.9.0: the four approved features (David, 2026-09-11)
+
+David approved all four candidates on 2026-09-11. They are no longer candidates.
+Ordered below by dependency and by how much each one is worth on its own, so the release
+can be cut after any of them if it needs to ship early.
+
+**1. Pull-the-rough onto a muted reference track.** Pull the current rough down from Take
+and drop it on a new track, muted, so it can be A/B'd against the mix in progress. This is
+the natural companion to the cut/loop proposals already shipped in 0.8.0, and it is the one
+that changes daily use the most: right now a rough has to leave REAPER to be heard against
+the session. Muted-on-arrival is the important detail, so it never surprises anyone on
+playback. Do this first; it also builds the download-and-insert path the others can reuse.
+
+**2. Time-selection-bounded rough push.** Push only what is inside the time selection
+instead of the whole timeline. Small once #1 exists, because it is the same push path with
+a start and end, and it makes pushing a single section for feedback cheap.
+
+**3. Batch stem push (all selected tracks).** Push every selected track as a stem in one
+action rather than one at a time. The upload-progress UI from 0.8.1 already exists and has
+been verified live; the work is queueing, per-stem progress, and a partial-failure story
+that does not leave half a push on the server.
+
+**4. Two-way marker sync.** REAPER markers carrying a prefix become Take comments, and Take
+comments come back as markers. Last because it is the only one with a real sync-conflict
+design problem: what happens when both sides change between refreshes. Do not start it
+until the first three are shipped and the prefix convention is settled.
+
+### Before writing any of this
+
+Read `LEARNINGS.md`, `ERRORS.md` and `MEMORY.md` first, as the top of this file says. Two
+hard-won Windows lessons in ERRORS.md 2026-08-05 bear directly on this work: the
+detached-curl launch needs an ExecProcess positive-timeout kill and cmd `move` rather than
+forward slashes, and ReaImGui 0.10 flipped the EndChild contract. The debugging technique
+that cracked both is `reaper.exe -nonewinst <probe.lua>`, which runs a script inside the
+REAPER instance that is already open.
+
+The ship checklist above is not optional and its order matters: live REAPER smoke test,
+then any migration applied to prod Supabase BEFORE pushing server code, because Vercel
+auto-deploys on any push to take's main and can leapfrog an unapplied migration.
+
+Every one of these needs David's ears in a live REAPER session before it can be called
+done. None of them can be verified by tests alone.
 
 ## Environment notes (this machine)
 
