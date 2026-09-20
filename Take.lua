@@ -1,5 +1,5 @@
 -- @description Take for Reaper
--- @version 0.8.1
+-- @version 0.8.2
 -- @author Dead Pixel Design
 -- @about
 --   A docked panel that connects this Reaper session to your Take projects.
@@ -659,15 +659,16 @@ local function http_download(url, dest, total)
   return http
 end
 
--- PUT a file to a (pre-signed) upload URL, streamed. Returns http_status.
--- The response body is diverted to a file (-o) so stdout is only the http_code;
--- otherwise status_from would parse a digit out of the JSON body. Instead of
--- -s we use -# (progress bar) with stderr routed to a file, which is what the
--- panel reads back to show a live percentage — uploads always run inside a
--- job, so the sync path (where stderr is discarded) never carries -#.
+-- PUT a file to a (pre-signed) upload URL, streamed. Returns http_status plus
+-- the storage service's response body (callers read it to tell a quota refusal
+-- from a generic failure). The body is diverted to a file (-o) so stdout is only
+-- the http_code; otherwise status_from would parse a digit out of the JSON body.
+-- Instead of -s we use -# (progress bar) with stderr routed to a file, which is
+-- what the panel reads back to show a live percentage — uploads always run
+-- inside a job, so the sync path (where stderr is discarded) never carries -#.
 local function http_upload(url, filepath, content_type)
   url = safe_url(url)
-  if not url then return 0 end
+  if not url then return 0, "" end
   REQ_SEQ = REQ_SEQ + 1
   local out_file = tmp_path("upload_resp_" .. REQ_SEQ .. ".txt")
   local prog_file = tmp_path("prog_" .. REQ_SEQ .. ".txt")
@@ -680,7 +681,22 @@ local function http_upload(url, filepath, content_type)
   local http = http_run(cmd, 300000, prog_file)
   state.transfer = nil
   safe_remove(prog_file)
-  return http
+  local body = read_file(out_file) or ""
+  retire_temps(nil, out_file)
+  return http, body
+end
+
+-- The owner's storage allowance is enforced twice, so "storage is full" reaches
+-- the panel by two different routes. A push asks the server to reserve the bytes
+-- first and gets a clean 413. A voice memo has no reservation step, so the only
+-- refusal is the storage trigger rejecting the signed PUT — that arrives as a
+-- generic 4xx/5xx whose body carries the quota message. Read both, so the user
+-- is told to clear space instead of "Upload failed (400)".
+local function is_quota_failure(http, body)
+  if http == 413 then return true end
+  body = tostring(body or ""):lower()
+  return body:find("storage quota", 1, true) ~= nil
+    or body:find("storage-limit-reached", 1, true) ~= nil
 end
 
 -- --------------------------------------------------------------------------
@@ -1090,18 +1106,27 @@ end
 -- Voice memos (spec §2.5, paid §2.11). request signed URL -> PUT the WAV ->
 -- finalize as a voice comment. ext/content-type come from the recorded file +
 -- the request response; the voice-memos bucket accepts wav.
-local function post_voice_memo(file, ext, timestamp_ms)
-  local pid = state.project.id
+local function post_voice_memo(file, ext, timestamp_ms, pid)
+  -- Send the real size so the server reserves that much of the owner's quota
+  -- instead of the bucket's 100 MB ceiling.
+  local body = { ext = ext }
+  local size = file_size(file)
+  if size > 0 then body.sizeBytes = size end
   local req_http, req_body = http_post_json(
-    "/api/reaper/projects/" .. pid .. "/voice/request", { ext = ext })
+    "/api/reaper/projects/" .. pid .. "/voice/request", body)
   if req_http == 401 then state.status = "Token rejected. Check it in Settings."; return false end
   if req_http == 403 then state.status = "This project's owner isn't on a paid plan."; return false end
+  if req_http == 413 then state.status = "The project owner's storage is full."; return false end
   if req_http == 400 then state.status = "Recording format not accepted (" .. ext .. ")."; return false end
   if req_http ~= 200 then state.status = "Voice request failed (" .. req_http .. ")."; return false end
   local req = json_decode(req_body)
   if not req or not req.signedUrl then state.status = "No upload URL returned."; return false end
 
-  local up = http_upload(req.signedUrl, file, req.contentType or MIME[ext] or "audio/wav")
+  local up, up_body = http_upload(req.signedUrl, file, req.contentType or MIME[ext] or "audio/wav")
+  if is_quota_failure(up, up_body) then
+    state.status = "The project owner's storage is full. Voice memo kept at: " .. file
+    return false
+  end
   if up ~= 200 then state.status = "Upload failed (" .. up .. "). Voice memo kept at: " .. file; return false end
 
   local payload = { path = req.path }
@@ -1111,7 +1136,7 @@ local function post_voice_memo(file, ext, timestamp_ms)
   if fin_http == 403 then state.status = "This project's owner isn't on a paid plan."; return false end
   if fin_http ~= 200 then state.status = "Finalize failed (" .. fin_http .. "). Voice memo kept at: " .. file; return false end
 
-  load_comments()
+  if state.project and state.project.id == pid then load_comments() end
   state.status = "Voice memo posted."
   return true
 end
@@ -1160,14 +1185,16 @@ local function start_voice_record()
   end
 
   local v = {}
-  v.cursor = reaper.GetCursorPosition() or 0
+  v.project = reaper.EnumProjects(-1)
+  v.take_project_id = state.project.id
+  v.cursor = reaper.GetCursorPositionEx(v.project) or 0
   v.timestamp_ms = state.comment_at_cursor and math.floor(v.cursor * 1000) or nil
 
-  v.count = reaper.CountTracks(0)
+  v.count = reaper.CountTracks(v.project)
   v.saved_arm = {}
   for i = 0, v.count - 1 do
-    local t = reaper.GetTrack(0, i)
-    v.saved_arm[i] = reaper.GetMediaTrackInfo_Value(t, "I_RECARM")
+    local t = reaper.GetTrack(v.project, i)
+    v.saved_arm[#v.saved_arm + 1] = { track = t, arm = reaper.GetMediaTrackInfo_Value(t, "I_RECARM") }
     reaper.SetMediaTrackInfo_Value(t, "I_RECARM", 0)
   end
 
@@ -1177,14 +1204,14 @@ local function start_voice_record()
   if input < 0 or input >= (reaper.GetNumAudioInputs() or 0) then input = 0 end
 
   reaper.InsertTrackAtIndex(v.count, false)
-  v.track = reaper.GetTrack(0, v.count)
+  v.track = reaper.GetTrack(v.project, v.count)
   reaper.GetSetMediaTrackInfo_String(v.track, "P_NAME", "Take voice memo (temp)", true)
   reaper.SetMediaTrackInfo_Value(v.track, "I_RECARM", 1)
   reaper.SetMediaTrackInfo_Value(v.track, "I_RECINPUT", input) -- mono hardware input
   reaper.SetMediaTrackInfo_Value(v.track, "I_RECMON", 0)   -- no input monitoring (no feedback)
   reaper.SetMediaTrackInfo_Value(v.track, "I_RECMODE", 0)  -- record input
 
-  reaper.SetEditCurPos((reaper.GetProjectLength(0) or 0) + 1.0, false, false)
+  reaper.SetEditCurPos2(v.project, (reaper.GetProjectLength(v.project) or 0) + 1.0, false, false)
   reaper.Main_OnCommand(1013, 0) -- Transport: Record
 
   state.voice = v
@@ -1201,11 +1228,21 @@ end
 -- zeroed. Returns the recorded file path and the comment timestamp (or nil).
 local function teardown_recording()
   local v = state.voice
-  reaper.Main_OnCommand(1016, 0) -- Transport: Stop (finalizes the recorded file)
   state.recording = false
+  if not v or not v.project or not reaper.ValidatePtr(v.project, "ReaProject*") then
+    state.voice = nil
+    return nil, v and v.timestamp_ms, v and v.take_project_id
+  end
+
+  -- Transport commands affect the selected tab. Switch to the recording's
+  -- project for cleanup, then put the user's current tab back.
+  local selected_project = reaper.EnumProjects(-1)
+  if selected_project ~= v.project then reaper.SelectProjectInstance(v.project) end
+  reaper.Main_OnCommand(1016, 0) -- Transport: Stop (finalizes the recorded file)
 
   local file
-  if v and v.track and reaper.GetTrackNumMediaItems(v.track) > 0 then
+  if v.track and reaper.ValidatePtr2(v.project, v.track, "MediaTrack*")
+      and reaper.GetTrackNumMediaItems(v.track) > 0 then
     local item = reaper.GetTrackMediaItem(v.track, 0)
     local take = item and reaper.GetActiveTake(item)
     if take then
@@ -1214,23 +1251,32 @@ local function teardown_recording()
     end
   end
 
-  if v and v.track then reaper.DeleteTrack(v.track) end
-  if v then
-    for i = 0, (v.count or 1) - 1 do
-      local t = reaper.GetTrack(0, i)
-      if t then reaper.SetMediaTrackInfo_Value(t, "I_RECARM", v.saved_arm[i] or 0) end
-    end
-    reaper.SetEditCurPos(v.cursor or 0, false, false)
+  if v.track and reaper.ValidatePtr2(v.project, v.track, "MediaTrack*") then
+    reaper.DeleteTrack(v.track)
   end
+  for _, saved in ipairs(v.saved_arm or {}) do
+    if reaper.ValidatePtr2(v.project, saved.track, "MediaTrack*") then
+      reaper.SetMediaTrackInfo_Value(saved.track, "I_RECARM", saved.arm)
+    end
+  end
+  reaper.SetEditCurPos2(v.project, v.cursor or 0, false, false)
   reaper.UpdateArrange()
+  if selected_project ~= v.project and reaper.ValidatePtr(selected_project, "ReaProject*") then
+    reaper.SelectProjectInstance(selected_project)
+  end
   state.voice = nil
-  return file, v and v.timestamp_ms
+  return file, v and v.timestamp_ms, v and v.take_project_id
 end
 
 local function stop_and_post_voice()
   if not state.recording or not state.voice then return end
+  -- The upload needs the single job slot. The 30s comment poll is skipped while
+  -- recording, but one that started just before Record can still be in flight —
+  -- and tearing down first would leave the memo on disk with nothing to post it.
+  -- Keep rolling instead; the slot frees up and the button works on the retry.
+  if state.job then state.status = "Busy — finish the current operation first."; return end
   -- Tear down + restore BEFORE the upload so the session is clean either way.
-  local file, timestamp_ms = teardown_recording()
+  local file, timestamp_ms, take_project_id = teardown_recording()
 
   if not file or file == "" then
     state.status = "No recording found. Check your audio input device."
@@ -1242,19 +1288,32 @@ local function stop_and_post_voice()
     return
   end
 
+  if not state.project or state.project.id ~= take_project_id then
+    state.status = "Take project changed. Voice memo kept at: " .. file
+    return
+  end
+
   local ext = (file:match("%.([^.]+)$") or "wav"):lower()
   state.status = "Uploading voice memo…"
-  start_job(function()
-    if post_voice_memo(file, ext, timestamp_ms) then
+  local started = start_job(function()
+    if post_voice_memo(file, ext, timestamp_ms, take_project_id) then
       safe_remove(file)
     end
   end)
+  -- start_job's own "Busy" line would hide where the recording went.
+  if not started then state.status = "Busy — voice memo kept at: " .. file end
 end
 
 -- Download one stem and drop it on a new track at its timecode. Runs inside a
 -- job coroutine (callers wrap it). Failure statuses are set here; returns true
 -- on success so callers can set their own summary line.
-local function import_stem_now(stem)
+local function import_stem_now(stem, target_project, take_project_id)
+  if not target_project or not reaper.ValidatePtr(target_project, "ReaProject*")
+      or reaper.EnumProjects(-1) ~= target_project
+      or not state.project or state.project.id ~= take_project_id then
+    state.status = "Return to the original project tab and try the pull again."
+    return false
+  end
   local http, body = http_get_json("/api/reaper/stems/" .. stem.id .. "/original")
   if http == 403 then state.status = "This project's owner isn't on a paid plan."; return false end
   if http ~= 200 then state.status = "Couldn't pull stem (" .. http .. ")."; return false end
@@ -1268,6 +1327,14 @@ local function import_stem_now(stem)
   local dest = tmp_path(safe_filename(tostring(stem.id)) .. "_" .. safe_name)
   local dl = http_download(data.url, dest, data.size_bytes or data.sizeBytes)
   if dl ~= 200 then state.status = "Download failed (" .. dl .. ")."; return false end
+
+  if not reaper.ValidatePtr(target_project, "ReaProject*")
+      or reaper.EnumProjects(-1) ~= target_project
+      or not state.project or state.project.id ~= take_project_id then
+    safe_remove(dest)
+    state.status = "Project tab changed during download. Return to it and pull again."
+    return false
+  end
 
   -- The download yielded across frames; the track ops below run synchronously
   -- in this resume, on the main thread, so REAPER calls are safe here.
@@ -1290,9 +1357,11 @@ local function import_stem_now(stem)
 end
 
 local function import_stem(stem)
+  local target_project = reaper.EnumProjects(-1)
+  local take_project_id = state.project and state.project.id
   state.status = "Pulling " .. tostring(stem.name or "stem") .. "…"
   start_job(function()
-    if import_stem_now(stem) then
+    if import_stem_now(stem, target_project, take_project_id) then
       state.status = "Imported " .. tostring(stem.name or "stem") .. "."
     end
   end)
@@ -1302,6 +1371,8 @@ end
 -- single job (the job slot is serial by design).
 local function import_all_stems()
   refresh_stem_presence()
+  local target_project = reaper.EnumProjects(-1)
+  local take_project_id = state.project and state.project.id
   local todo = {}
   for _, s in ipairs(state.stems) do
     if s.id and not state.stem_presence[s.id] then todo[#todo + 1] = s end
@@ -1311,7 +1382,7 @@ local function import_all_stems()
     local done = 0
     for n, s in ipairs(todo) do
       state.status = "Pulling " .. tostring(s.name or "stem") .. " (" .. n .. "/" .. #todo .. ")…"
-      if not import_stem_now(s) then break end -- its status already says what failed
+      if not import_stem_now(s, target_project, take_project_id) then break end -- its status already says what failed
       done = done + 1
     end
     if done == #todo then state.status = "Imported " .. done .. " stem(s)." end
@@ -1330,23 +1401,34 @@ local function upload_and_finalize(kind, file, ext, name, extra, on_done)
     return false
   end
 
+  -- Bind the whole push to the project it started on. The panel stays clickable
+  -- while the upload runs, so the user can go Back and open a different project
+  -- mid-transfer; re-reading state.project at finalize would file the object
+  -- (already written under the ORIGINAL project's folder) against the new one.
+  local pid = state.project and state.project.id
+  if not pid then return fail("Open a project first.") end
+
   state.status = "Uploading " .. name .. "…"
   local req_http, req_body = http_post_json("/api/reaper/push/" .. kind .. "/request", {
-    projectId = state.project.id,
+    projectId = pid,
     ext = ext,
     sizeBytes = file_size(file),
     mimeType = MIME[ext],
   })
   if req_http == 401 then return fail("Token rejected. Check it in Settings.") end
   if req_http == 403 then return fail("This project's owner isn't on a paid plan.") end
+  if req_http == 413 then return fail("The project owner's storage is full.") end
   if req_http ~= 200 then return fail("Push request failed (" .. req_http .. ").") end
   local req = json_decode(req_body)
   if not req or not req.signedUrl then return fail("No upload URL returned.") end
 
-  local up = http_upload(req.signedUrl, file, MIME[ext])
+  local up, up_body = http_upload(req.signedUrl, file, MIME[ext])
+  -- The reservation above can still lose a race with another upload, and the
+  -- storage trigger has the final say on the real byte count.
+  if is_quota_failure(up, up_body) then return fail("The project owner's storage is full.") end
   if up ~= 200 then return fail("Upload failed (" .. up .. ").") end
 
-  local body = { projectId = state.project.id, path = req.path }
+  local body = { projectId = pid, path = req.path }
   body[kind == "stem" and "stemId" or "roughId"] = (kind == "stem") and req.stemId or req.roughId
   for k, v in pairs(extra or {}) do body[k] = v end
 
@@ -1403,9 +1485,13 @@ local function push_stem()
     return
   end
 
+  local pid = state.project.id
   start_job(function()
     if upload_and_finalize("stem", file, ext, name, { name = name, timecodeOffsetMs = 0 }) then
-      open_project(state.project) -- refresh the stem list
+      -- Only re-pull the list if the panel is still on the project we pushed to.
+      if state.project and state.project.id == pid then
+        open_project(state.project) -- refresh the stem list
+      end
       state.status = "Pushed stem: " .. name .. "."
     end
   end)

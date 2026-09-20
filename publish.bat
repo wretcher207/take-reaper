@@ -72,6 +72,13 @@ if not errorlevel 1 (
   echo node not found; skipping Take.lua test harness.
 )
 
+REM --- This repo must be on main (we push origin main below) ---------
+for /f "delims=" %%b in ('git rev-parse --abbrev-ref HEAD') do set "RBRANCH=%%b"
+if /i not "%RBRANCH%"=="main" (
+  echo take-reaper is on "%RBRANCH%", not main. Check out main and re-run.
+  pause & exit /b 1
+)
+
 REM --- Locate the sibling take repo ----------------------------------
 set "WEB=..\take\apps\web\public\reaper"
 set "APP=..\take\apps\reaper"
@@ -79,6 +86,55 @@ if not exist "%WEB%\" (
   echo Cannot find %WEB% - is the take repo a sibling of take-reaper?
   pause & exit /b 1
 )
+
+REM --- The take repo must be on main, clean, and level with origin ---
+REM  Steps 5 and 6 below push the take repo and deploy it to production from
+REM  WHATEVER it has checked out. `vercel --prod` uploads the working directory,
+REM  not a commit, so a feature branch or a dirty tree would put unmerged app
+REM  code on takeaudio.com - including code that expects a migration nobody has
+REM  applied yet. A Reaper release must never be the thing that deploys that.
+pushd "..\take"
+for /f "delims=" %%b in ('git rev-parse --abbrev-ref HEAD') do set "TBRANCH=%%b"
+if /i not "%TBRANCH%"=="main" (
+  echo.
+  echo The take repo is on "%TBRANCH%", not main.
+  echo Merge your work to main and check main out there first - publishing from
+  echo a feature branch would deploy unmerged code to takeaudio.com.
+  popd & pause & exit /b 1
+)
+REM  --porcelain, not `git diff --quiet HEAD`: untracked files are uploaded by
+REM  vercel too, and a half-finished migration or route sitting untracked is
+REM  exactly the thing this guard exists to keep off takeaudio.com.
+set "TDIRTY="
+for /f "delims=" %%s in ('git status --porcelain') do set "TDIRTY=1"
+if defined TDIRTY (
+  echo.
+  echo The take repo has uncommitted or untracked changes. vercel --prod uploads
+  echo the working directory as-is, so those files would go live. Commit, stash,
+  echo or clean them first:
+  git status --short
+  popd & pause & exit /b 1
+)
+git fetch --quiet origin main
+if errorlevel 1 (
+  echo.
+  echo Could not fetch origin/main in the take repo. Check the network and
+  echo re-run - publishing without knowing what is on main is not safe.
+  popd & pause & exit /b 1
+)
+for /f "delims=" %%h in ('git rev-parse HEAD') do set "THEAD=%%h"
+for /f "delims=" %%h in ('git rev-parse origin/main') do set "TORIGIN=%%h"
+if not "%THEAD%"=="%TORIGIN%" (
+  echo.
+  echo The take repo's main is not level with origin/main.
+  echo   local:  %THEAD%
+  echo   origin: %TORIGIN%
+  echo Pull or push there first, then re-run.
+  popd & pause & exit /b 1
+)
+popd
+echo take repo: on main, clean, level with origin.
+echo.
 
 REM --- Copy the two files into both in-repo locations ----------------
 copy /Y "Take.lua"  "%WEB%\Take.lua"  >nul || ( echo copy failed & pause & exit /b 1 )

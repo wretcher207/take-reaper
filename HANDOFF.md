@@ -1,8 +1,91 @@
-> status: v0.8.1 shipped; v0.9.0 scoped and approved | one-liner: Take REAPER panel v0.8.1 published and verified live on Windows | next: build the four approved v0.9.0 features in the order below. David approved all four on 2026-09-11, so the old "David picks a slice" question is answered and closed. Start with pull-the-rough.
+> status: v0.8.2 PREPARED, NOT PUBLISHED; v0.8.1 still live; v0.9.0 scoped | one-liner: v0.8.2 safety release is staged in both repos and passes every offline check — it needs David's live REAPER smoke test, then a merge to main, then publish.bat | next: run the v0.8.2 release steps below. v0.9.0's four approved features come after.
 
 # HANDOFF — Take for Reaper
 
 Cold start for a new session. Read this first, then `LEARNINGS.md` / `ERRORS.md` / `MEMORY.md` before touching anything.
+
+## v0.8.2 — prepared 2026-09-20, NOT published
+
+Nothing has been pushed, deployed or published. ReaPack still serves 0.8.1.
+`Take.lua` and `index.xml` are staged at 0.8.2 and byte-identical across all
+four locations (`take-reaper/`, `take/apps/reaper/`,
+`take/apps/web/public/reaper/`). Both repos are uncommitted.
+
+**What 0.8.2 contains.** The remediation fixes that landed in the take repo
+after 0.8.1 shipped and were never released (HOSTILE_REVIEW_2026-09-20 §12),
+plus four fixes found reviewing them:
+
+- Voice-memo teardown restores record-arm by **track identity**, not by index,
+  skips tracks that were deleted mid-recording, and does its transport stop /
+  temp-track removal / cursor restore on the **project tab the memo started in**,
+  putting the user's tab back afterwards.
+- An async stem import aborts — before AND after the download — if the REAPER
+  tab or the selected Take project changed, and deletes the downloaded file
+  instead of dropping audio into the wrong session.
+- "The project owner's storage is full" on a push (413 from the reservation)
+  **and** on a voice memo, which has no reservation step — its only refusal is
+  the storage trigger rejecting the signed PUT, so `http_upload` now returns the
+  response body and `is_quota_failure()` reads the reason out of it.
+- A push is finalized against the **project it started on**. The panel stays
+  clickable during an upload, so opening another project mid-transfer used to
+  file an object written under the original project's folder against the new one.
+- `Stop and post` no longer throws a recording away when a background comment
+  refresh holds the single job slot; it refuses, keeps rolling, and on the
+  fallback path names the file it kept.
+
+`take-reaper` had **no** unreleased work to lose — its `Take.lua` is untouched
+since the v0.8.1 commit, and the approved v0.9.0 features are scoped in this
+file only, with no code anywhere. take-reaper is now the source of truth again,
+which matters because `publish.bat` copies FROM here INTO take.
+
+**Verified offline:** `luac -p` on all three copies, `node tools/check.js`
+(syntax + Lua-VM unit tests, now covering `is_quota_failure`),
+`lua tests/reaper-state.test.lua` in the take repo (now covering the push's
+project binding and the voice-memo quota message), `cmp` across all four
+locations, and the index parses as XML.
+
+**Unverified — needs a live REAPER session.** Every behavior above. No agent
+can test ReaImGui, the transport, project tabs, or a real upload.
+
+### The ordered steps for David
+
+1. **Smoke-test 0.8.2 in live REAPER first.** Load `Take.lua` from
+   `take-reaper\` (or copy it over the installed script) and exercise:
+   - Start a voice memo, and **while it records** reorder two tracks and delete
+     a third. Stop and post. Every surviving track's record-arm must come back
+     exactly as it was, the temp track must be gone, and the edit cursor must be
+     where you left it.
+   - Start a voice memo, **switch to another project tab**, then Stop and post
+     from there. The other tab's transport, tracks and cursor must be untouched.
+   - `Import all` on a project with several stems, then **switch project tabs
+     mid-pull**. It must stop with "Return to the original project tab" and put
+     nothing in the new tab. Switch back and pull again — it must finish.
+   - Push a stem, and **while it uploads go Back and open a different project**.
+     The stem must land on the project you pushed from, not the one you opened.
+   - If you can get an account to its storage limit, push a stem and record a
+     voice memo: both must say the owner's storage is full, not an error code.
+   - Then the standard list: pairing, projects, stem push with the percentage,
+     comments, 30s auto-refresh, a cut proposal.
+2. **Merge to `main` in the take repo and check main out there.** `publish.bat`
+   pushes and deploys production from whatever take has checked out, and
+   `vercel --prod` uploads the working directory rather than a commit. The guard
+   added below will refuse to run otherwise, but the merge still has to happen.
+   Apply any migration that unmerged app code depends on to prod Supabase BEFORE
+   that merge lands — Vercel auto-deploys on any push to take's main.
+3. **Double-click `publish.bat`** in `take-reaper`. It re-runs the checks,
+   copies both files into the take repo, pushes both repos and deploys.
+4. **In REAPER: ReaPack > Synchronize packages**, then confirm the panel reports
+   0.8.2. If the index looks stale, remove the Take repo in ReaPack and
+   re-import `https://takeaudio.com/reaper/index.xml` (LEARNINGS 2026-06-09).
+
+### publish.bat / publish.sh now guard the take repo
+
+Both scripts refuse to run unless the take repo is on `main`, has no
+uncommitted tracked changes, and is level with `origin/main` (and unless
+take-reaper itself is on `main`). Today, with take on `feat/return-loop` and
+dirty, running `publish.bat` would have pushed that branch and deployed its
+working directory — unmerged app code, some of it depending on migrations that
+are not applied — to takeaudio.com as a side effect of a Reaper release.
 
 ## State as of 2026-08-05 — v0.8.1 SHIPPED
 

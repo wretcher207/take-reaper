@@ -32,10 +32,12 @@ function carve(startMarker, endMarker) {
 const jsonBlock = carve('local JSON_NULL', 'local function tmp_path');
 // shq/safe_url/safe_filename/fmt_bytes/version_newer
 const pureBlock = carve('-- Single-quote a string', '-- Remove a directory');
+// is_quota_failure — pure string/status predicate, no REAPER calls
+const quotaBlock = carve('local function is_quota_failure', '-- Render (push side)');
 
 (async () => {
   const lua = await new LuaFactory().createEngine();
-  const harness = jsonBlock + '\n' + pureBlock + `
+  const harness = jsonBlock + '\n' + pureBlock + '\n' + quotaBlock + `
     local function eq(a, b, label)
       if a ~= b then error(label .. ': got [' .. tostring(a) .. '] want [' .. tostring(b) .. ']', 2) end
     end
@@ -110,6 +112,25 @@ const pureBlock = carve('-- Single-quote a string', '-- Remove a directory');
     eq(version_newer('0.7', '0.7.0'), false, 'short form equal')
     eq(version_newer(nil, '1.0'), false, 'nil never newer')
     eq(version_newer('abc', '1.0'), false, 'garbage never newer')
+
+    -- ---- is_quota_failure ------------------------------------------------
+    -- The push path reserves bytes server-side and gets a clean 413.
+    eq(is_quota_failure(413, ''), true, '413 is a quota refusal')
+    -- A voice memo has no reservation step, so the only refusal is the storage
+    -- trigger rejecting the signed PUT — the reason is in the body, not the code.
+    eq(is_quota_failure(400,
+      '{"error":"Database error","message":"owner audio storage quota exceeded"}'),
+      true, 'trigger message on a 400')
+    eq(is_quota_failure(500,
+      '{"message":"Owner Audio Storage Quota Exceeded"}'),
+      true, 'trigger message is matched case-insensitively')
+    eq(is_quota_failure(400, '{"error":"storage-limit-reached"}'), true, 'server error code')
+    -- Everything else must keep reporting its own status, not "storage is full".
+    eq(is_quota_failure(403, '{"error":"forbidden"}'), false, 'paid gate is not a quota')
+    eq(is_quota_failure(0, ''), false, 'network failure is not a quota')
+    eq(is_quota_failure(-1, ''), false, 'curl-never-ran is not a quota')
+    eq(is_quota_failure(200, ''), false, 'success is not a quota')
+    eq(is_quota_failure(400, nil), false, 'nil body is safe')
 
     return 'ALL TESTS PASSED'
   `;
