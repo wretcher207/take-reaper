@@ -6,6 +6,10 @@
         <description><![CDATA[Take — the layer between your DAW and the people you make music with.]]></description>
         <link rel="website">https://takeaudio.com</link>
       </metadata>
+      <version name="0.8.3" author="Dead Pixel Design" time="2026-09-21T01:00:50Z">
+        <changelog><![CDATA[Clearer project navigation with Comments, Import stems, and Upload audio sections. Upload buttons name what they render. Advanced connection settings and edit proposals stay collapsed until opened. Recording controls remain accessible when switching sections. Rough and stem names are kept separately.]]></changelog>
+        <source main="main">https://takeaudio.com/reaper/Take.lua</source>
+      </version>
       <version name="0.8.2" author="Dead Pixel Design" time="2026-09-20T22:00:00Z">
         <changelog><![CDATA[Safety fixes for sessions with more than one thing going on. Recording a voice memo used to restore every track's record-arm by position, so reordering or deleting tracks while the memo was rolling put the arms back on the wrong tracks; arms are now tracked by identity, deleted tracks are skipped, and the whole teardown — transport stop, temp track removal, edit cursor — stays on the project tab the memo started in instead of whichever tab is in front when you stop. Pulling a stem checks the tab again after the download finishes and stops rather than dropping audio into a project you switched to mid-pull, and a push is finalized against the project it started on even if you open a different one while it uploads. When the project owner is out of storage, pushes and voice memos now say so instead of reporting an upload error code. Stop and post no longer discards a recording when a background refresh holds the transfer slot — it waits and tells you the memo is still on disk.]]></changelog>
         <source main="main">https://takeaudio.com/reaper/Take.lua</source>

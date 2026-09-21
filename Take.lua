@@ -1,9 +1,9 @@
 -- @description Take for Reaper
--- @version 0.8.2
+-- @version 0.8.3
 -- @author Dead Pixel Design
 -- @about
 --   A docked panel that connects this Reaper session to your Take projects.
---   Paste an API token (create one at takeaudio.com/settings/reaper), browse the
+--   Connect through your browser, then browse the
 --   projects you collaborate on, pull stems onto tracks at their timecode, and
 --   push back: render the selected track as a new stem, or render the master as
 --   a new rough. Read the project's comments and drop your own from the panel —
@@ -64,6 +64,10 @@ end
 local state = {
   base_url = trim(reaper.GetExtState(EXT, "base_url")),
   token = trim(reaper.GetExtState(EXT, "token")),
+  project_section = "comments",
+  advanced_connection = false,
+  show_proposals = false,
+  rough_label = "",
   view = "projects", -- "projects" | "project"
   projects = {},
   project = nil, -- { id, name }
@@ -782,7 +786,7 @@ end
 -- Actions
 -- --------------------------------------------------------------------------
 local function load_projects()
-  if state.token == "" then state.status = "Add a token in Settings first."; return end
+  if state.token == "" then state.status = "Connect to Take in Settings first."; return end
   state.status = "Loading projects…"
   local http, body = http_get_json("/api/reaper/projects")
   if http == -1 then
@@ -993,7 +997,7 @@ end
 -- loop counts to 2..8. Runs inside a job like every network button.
 local function propose_edit(kind, sel_start, sel_end)
   if not state.project then state.status = "Open a project first."; return end
-  if state.token == "" then state.status = "Add a token in Settings first."; return end
+  if state.token == "" then state.status = "Connect to Take in Settings first."; return end
   local start_ms = math.floor((sel_start or 0) * 1000)
   local end_ms = math.floor((sel_end or 0) * 1000)
   if end_ms <= start_ms then
@@ -1012,7 +1016,7 @@ local function propose_edit(kind, sel_start, sel_end)
     if http == 401 then state.status = "Token rejected. Check it in Settings."; return end
     if http == 403 then state.status = "This project's owner isn't on a paid plan."; return end
     if http == 409 then
-      state.status = "No current rough — push a rough first; proposals attach to it."
+      state.status = "Upload a rough before adding a proposal; proposals attach to it."
       return
     end
     if http ~= 200 then state.status = "Couldn't save the proposal (" .. http .. ")."; return end
@@ -1172,7 +1176,7 @@ end
 -- was. The edit cursor at record-time becomes the comment timestamp.
 local function start_voice_record()
   if not state.project then state.status = "Open a project first."; return end
-  if state.token == "" then state.status = "Add a token in Settings first."; return end
+  if state.token == "" then state.status = "Connect to Take in Settings first."; return end
   if state.recording then return end
   -- Command 1013 TOGGLES transport record: fired while the user is already
   -- playing or recording it would stop/mangle their real session take. And the
@@ -1444,9 +1448,9 @@ end
 local function push_stem()
   if state.job then state.status = "Busy — finish the current operation first."; return end
   if not state.project then state.status = "Open a project first."; return end
-  if state.token == "" then state.status = "Add a token in Settings first."; return end
+  if state.token == "" then state.status = "Connect to Take in Settings first."; return end
   local track = reaper.GetSelectedTrack(0, 0)
-  if not track then state.status = "Select a track to push first."; return end
+  if not track then state.status = "Select a track in REAPER before uploading a stem."; return end
   local _, track_name = reaper.GetSetMediaTrackInfo_String(track, "P_NAME", "", false)
   if track_name == "" then track_name = "Stem" end
   local name = state.push_name ~= "" and state.push_name or track_name
@@ -1477,7 +1481,7 @@ local function push_stem()
   reaper.UpdateArrange()
 
   if not ok then
-    state.status = "Push failed: " .. tostring(err)
+    state.status = "Upload failed: " .. tostring(err)
     return
   end
   if not file then
@@ -1492,7 +1496,7 @@ local function push_stem()
       if state.project and state.project.id == pid then
         open_project(state.project) -- refresh the stem list
       end
-      state.status = "Pushed stem: " .. name .. "."
+      state.status = "Uploaded stem: " .. name .. "."
     end
   end)
 end
@@ -1500,8 +1504,8 @@ end
 local function push_rough()
   if state.job then state.status = "Busy — finish the current operation first."; return end
   if not state.project then state.status = "Open a project first."; return end
-  if state.token == "" then state.status = "Add a token in Settings first."; return end
-  local label = state.push_name ~= "" and state.push_name or nil
+  if state.token == "" then state.status = "Connect to Take in Settings first."; return end
+  local label = state.rough_label ~= "" and state.rough_label or nil
   local stem_ids = {}
   for _, s in ipairs(state.stems) do stem_ids[#stem_ids + 1] = s.id end
   local extra = { activeStemIds = stem_ids, timecodeOffsetMs = 0 }
@@ -1516,7 +1520,7 @@ local function push_rough()
 
   start_job(function()
     upload_and_finalize("rough", file, ext, label or "rough", extra, function()
-      state.status = "Pushed a new rough." .. (label and (" (" .. label .. ")") or "")
+      state.status = "Uploaded a new rough." .. (label and (" (" .. label .. ")") or "")
     end)
   end)
 end
@@ -1546,6 +1550,9 @@ local function push_theme()
   reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_ChildRounding(), 5)
   reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_WindowRounding(), 6)
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), COLORS.ink)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_TitleBg(), COLORS.paper_warm)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_TitleBgActive(), COLORS.paper_warm)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_TitleBgCollapsed(), COLORS.paper_warm)
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_WindowBg(), COLORS.paper)
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ChildBg(), COLORS.bone)
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Border(), COLORS.line)
@@ -1561,7 +1568,7 @@ local function push_theme()
 end
 
 local function pop_theme()
-  reaper.ImGui_PopStyleColor(ctx, 13)
+  reaper.ImGui_PopStyleColor(ctx, 16)
   reaper.ImGui_PopStyleVar(ctx, 6)
 end
 
@@ -1596,7 +1603,7 @@ local function primary_button(label, width)
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Button(), COLORS.coral)
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonHovered(), COLORS.coral_soft)
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonActive(), COLORS.coral)
-  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), COLORS.bone)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), COLORS.ink)
   local clicked = reaper.ImGui_Button(ctx, label, width or 0, 0)
   reaper.ImGui_PopStyleColor(ctx, 4)
   return clicked
@@ -1618,19 +1625,18 @@ local function draw_comment_item(c)
 
   if pl then
     -- Cut/loop proposal: audition the range, or drop a spanning region.
-    if reaper.ImGui_Button(ctx, "Select##sel_" .. key) then select_proposal(c) end
+    if reaper.ImGui_Button(ctx, "Select time range##sel_" .. key) then select_proposal(c) end
     reaper.ImGui_SameLine(ctx)
-    if reaper.ImGui_Button(ctx, "Region##region_" .. key) then add_comment_marker(c) end
+    if reaper.ImGui_Button(ctx, "Add region##region_" .. key) then add_comment_marker(c) end
   elseif ms then
-    if reaper.ImGui_Button(ctx, "Jump##jump_" .. key) then jump_to_comment(c) end
+    if reaper.ImGui_Button(ctx, "Jump to comment##jump_" .. key) then jump_to_comment(c) end
     reaper.ImGui_SameLine(ctx)
-    if reaper.ImGui_Button(ctx, "Marker##marker_" .. key) then add_comment_marker(c) end
+    if reaper.ImGui_Button(ctx, "Add marker##marker_" .. key) then add_comment_marker(c) end
     if c.is_voice then
-      reaper.ImGui_SameLine(ctx)
-      if reaper.ImGui_Button(ctx, "Voice##voice_" .. key) then open_voice_memo(c) end
+      if reaper.ImGui_Button(ctx, "Open voice memo##voice_" .. key) then open_voice_memo(c) end
     end
   elseif c.is_voice then
-    if reaper.ImGui_Button(ctx, "Voice##voice_" .. key) then open_voice_memo(c) end
+    if reaper.ImGui_Button(ctx, "Open voice memo##voice_" .. key) then open_voice_memo(c) end
   else
     muted_text("Project note")
   end
@@ -1767,6 +1773,18 @@ end
 local function draw_settings()
   section_title("Connection", "Take account")
   local changed
+  muted_text("Connect")
+  if state.pairing then
+    reaper.ImGui_TextWrapped(ctx, "Waiting for you to approve Take in your browser. Come back here once you have.")
+    if reaper.ImGui_Button(ctx, "Cancel") then state.pairing = nil; state.status = "" end
+  else
+    reaper.ImGui_TextWrapped(ctx, "Approve the connection in your browser, then return to REAPER.")
+    if primary_button("Connect to Take", content_width()) then start_job(start_pairing) end
+  end
+  if reaper.ImGui_Button(ctx, state.advanced_connection and "Hide advanced connection settings" or "Advanced connection settings") then
+    state.advanced_connection = not state.advanced_connection
+  end
+  if state.advanced_connection then
   muted_text("Server URL")
   reaper.ImGui_TextWrapped(ctx, "Use " .. DEFAULT_BASE_URL .. " for the live Take app. This is not the ReaPack install URL.")
   reaper.ImGui_SetNextItemWidth(ctx, content_width())
@@ -1779,22 +1797,16 @@ local function draw_settings()
     state.base_url = DEFAULT_BASE_URL
     reaper.SetExtState(EXT, "base_url", state.base_url, true)
   end
-  muted_text("Connect")
-  if state.pairing then
-    reaper.ImGui_TextWrapped(ctx, "Waiting for you to approve Take in your browser. Come back here once you have.")
-    if reaper.ImGui_Button(ctx, "Cancel") then state.pairing = nil; state.status = "" end
-  else
-    reaper.ImGui_TextWrapped(ctx, "Click Connect, approve Take in the browser tab that opens, and you're in. No key to copy.")
-    if primary_button("Connect", content_width()) then start_job(start_pairing) end
-  end
   muted_text("API token (optional)")
-  reaper.ImGui_TextWrapped(ctx, "Prefer to paste a key? Create one at " .. DEFAULT_BASE_URL .. "/settings/reaper and paste the full take_ token here. Connect above is easier.")
+  reaper.ImGui_TextWrapped(ctx, "Paste a token from " .. DEFAULT_BASE_URL .. "/settings/reaper.")
   reaper.ImGui_SetNextItemWidth(ctx, content_width())
   changed, state.token = reaper.ImGui_InputText(ctx, "##api_token", state.token,
     reaper.ImGui_InputTextFlags_Password())
   if changed then
     state.token = trim(state.token)
     reaper.SetExtState(EXT, "token", state.token, true)
+  end
+
   end
 
   section_title("Voice memos", "mic input")
@@ -1825,23 +1837,25 @@ end
 
 local function draw_projects()
   section_title("Projects", #state.projects > 0 and (#state.projects .. " available") or "")
+  muted_text("Choose a song to open its audio and comments.")
   -- All network-touching buttons run through start_job so a slow server never
   -- freezes REAPER's UI (the 0.6.6 fix covered pushes/pulls; this covers the
   -- rest). start_job itself reports "Busy" if a transfer is already running.
-  if primary_button("Refresh projects", content_width()) then start_job(load_projects) end
+  if reaper.ImGui_Button(ctx, "Refresh projects") then start_job(load_projects) end
   if state.token == "" then
-    empty_state("Add your token in Settings to load paid projects.")
+    empty_state("Connect to Take to open your projects.")
+    if primary_button("Connect to Take", content_width()) then state.show_settings = true end
     return
   end
   if #state.projects == 0 then
-    empty_state("No projects loaded yet.")
+    empty_state("No projects available. Create or join a project on takeaudio.com, then refresh. The project owner needs a paid plan.")
     return
   end
 
   local vis = reaper.ImGui_BeginChild(ctx, "project_list", 0, 220)
   if vis then
     for i, p in ipairs(state.projects) do
-      local label = tostring(i) .. ". " .. tostring(p.name or "Untitled") .. "##" .. tostring(p.id or i)
+      local label = tostring(p.name or "Untitled") .. "##" .. tostring(p.id or i)
       if reaper.ImGui_Selectable(ctx, label) then start_job(function() open_project(p) end) end
     end
   end
@@ -1849,92 +1863,121 @@ local function draw_projects()
 end
 
 local function draw_project()
-  if reaper.ImGui_Button(ctx, "< Projects") then state.view = "projects" end
-  reaper.ImGui_SameLine(ctx)
-  reaper.ImGui_TextColored(ctx, COLORS.ink, state.project and state.project.name or "")
-  if primary_button("Render and push rough", content_width()) then push_rough() end
-
-  section_title("Stems", #state.stems > 0 and (#state.stems .. " in this project") or "")
-  if #state.stems == 0 then
-    empty_state("No stems in this project yet.")
-  else
-    if reaper.time_precise() > (state.presence_next or 0) then
-      refresh_stem_presence()
-      state.presence_next = reaper.time_precise() + 2
+  if reaper.ImGui_Button(ctx, "Back to projects") then state.view = "projects" end
+  reaper.ImGui_TextWrapped(ctx, state.project and state.project.name or "")
+  local nav_width = (content_width() - 16) / 3
+  for i, tab in ipairs({{"comments", "Comments"}, {"import", "Import stems"}, {"upload", "Upload audio"}}) do
+    if i > 1 then reaper.ImGui_SameLine(ctx) end
+    local clicked
+    if state.project_section == tab[1] then
+      clicked = primary_button(tab[2], nav_width)
+    else
+      clicked = reaper.ImGui_Button(ctx, tab[2], nav_width, 0)
     end
-    if reaper.ImGui_Button(ctx, "Import all") then import_all_stems() end
-    local vis = reaper.ImGui_BeginChild(ctx, "stem_list", 0, 128)
-    if vis then
-      for si, s in ipairs(state.stems) do
-        reaper.ImGui_TextWrapped(ctx, tostring(s.name or "Stem"))
-        reaper.ImGui_SameLine(ctx)
-        if s.id and state.stem_presence[s.id] then
-          muted_text("(in session)")
-          reaper.ImGui_SameLine(ctx)
-        end
-        if reaper.ImGui_Button(ctx, "Import##" .. tostring(s.id or si)) then import_stem(s) end
-      end
-    end
-    end_child(vis)
+    if clicked then state.project_section = tab[1] end
   end
-
-  section_title("Push stem", "selected track")
   local changed
-  reaper.ImGui_SetNextItemWidth(ctx, content_width())
-  changed, state.push_name = reaper.ImGui_InputText(ctx, "Name (optional)", state.push_name)
-  if primary_button("Push selected track", content_width()) then push_stem() end
+  if state.project_section == "import" then
+    reaper.ImGui_TextWrapped(ctx, "Add project stems to this REAPER session. Stems are individual audio parts, such as guitar, bass, or drums.")
+    section_title("Stems", #state.stems > 0 and (#state.stems .. " in this project") or "")
+    if #state.stems == 0 then
+      empty_state("No stems in this project yet.")
+    else
+      if reaper.time_precise() > (state.presence_next or 0) then
+        refresh_stem_presence()
+        state.presence_next = reaper.time_precise() + 2
+      end
+      if reaper.ImGui_Button(ctx, "Import all stems") then import_all_stems() end
+      local vis = reaper.ImGui_BeginChild(ctx, "stem_list", 0, 128)
+      if vis then
+        for si, s in ipairs(state.stems) do
+          if reaper.ImGui_Button(ctx, "Import##" .. tostring(s.id or si), 70, 0) then import_stem(s) end
+          reaper.ImGui_SameLine(ctx)
+          reaper.ImGui_TextWrapped(ctx, tostring(s.name or "Stem") .. ((s.id and state.stem_presence[s.id]) and " (in session)" or ""))
+        end
+      end
+      end_child(vis)
+    end
 
-  section_title("Propose", "cut / loop from time selection")
-  local sel_start, sel_end = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
-  if not sel_end or sel_end <= (sel_start or 0) then
-    muted_text("Make a time selection in REAPER to propose a cut or loop.")
-  else
-    muted_text("Selection: " .. fmt_ts(math.floor(sel_start * 1000)) .. "-" .. fmt_ts(math.floor(sel_end * 1000)))
+  elseif state.project_section == "upload" then
+    section_title("Rough mix", "the whole song")
+    reaper.ImGui_TextWrapped(ctx, "Render the master mix and upload it as a new stereo rough. Earlier versions stay in Take.")
+    muted_text("Rough label (optional)")
     reaper.ImGui_SetNextItemWidth(ctx, content_width())
-    changed, state.propose_note = reaper.ImGui_InputText(ctx, "Note (optional)##propose", state.propose_note)
-    if primary_button("Propose cut") then propose_edit("cut", sel_start, sel_end) end
-    reaper.ImGui_SameLine(ctx)
-    if primary_button("Propose loop") then propose_edit("loop", sel_start, sel_end) end
-    reaper.ImGui_SameLine(ctx)
-    reaper.ImGui_SetNextItemWidth(ctx, 80)
-    changed, state.loop_count = reaper.ImGui_SliderInt(ctx, "##loop_count", state.loop_count, 2, 8, "x%d")
-  end
+    changed, state.rough_label = reaper.ImGui_InputText(ctx, "##rough_label", state.rough_label)
+    if primary_button("Render and upload rough", content_width()) then push_rough() end
+    section_title("Stem", "selected track")
+    reaper.ImGui_TextWrapped(ctx, "Render the selected track and upload it as a new stem.")
+    local track = reaper.GetSelectedTrack(0, 0)
+    if track then
+      local _, name = reaper.GetSetMediaTrackInfo_String(track, "P_NAME", "", false)
+      reaper.ImGui_TextWrapped(ctx, "Selected track: " .. (name ~= "" and name or "Unnamed track"))
+    else
+      muted_text("Select a track in REAPER first.")
+    end
+    muted_text("Stem name (optional)")
+    reaper.ImGui_SetNextItemWidth(ctx, content_width())
+    changed, state.push_name = reaper.ImGui_InputText(ctx, "##stem_name", state.push_name)
+    if primary_button("Render and upload selected track", content_width()) then push_stem() end
+    reaper.ImGui_TextWrapped(ctx, "Uses the format set in File > Render: WAV, AIFF, FLAC, or MP3.")
+  else
+    section_title("Comments", #state.comments > 0 and (#state.comments .. " in this project") or "")
+    if reaper.ImGui_Button(ctx, "Refresh comments") then start_job(load_comments) end
+    if #state.comments > 0 then
+      if reaper.ImGui_Button(ctx, "Add comment markers") then sync_comment_markers() end
+      reaper.ImGui_SameLine(ctx)
+      if reaper.ImGui_Button(ctx, "Clear Take markers") then
+        local removed = clear_take_markers()
+        state.status = removed == 0 and "No Take markers to clear." or ("Cleared " .. removed .. " Take marker(s).")
+      end
+    end
+    if #state.comments == 0 then
+      empty_state("No comments yet.")
+    else
+      local vis = reaper.ImGui_BeginChild(ctx, "comment_list", 0, 160)
+      if vis then
+        for _, c in ipairs(state.comments) do
+          draw_comment_item(c)
+        end
+        if state.scroll_comments then
+          reaper.ImGui_SetScrollHereY(ctx, 1.0)
+          state.scroll_comments = false
+        end
+      end
+      end_child(vis)
+    end
+    muted_text("New comment")
+    reaper.ImGui_SetNextItemWidth(ctx, content_width())
+    changed, state.comment_body = reaper.ImGui_InputText(ctx, "##new_comment", state.comment_body)
+    local cursor_label = "Attach to rough at " .. fmt_ts(math.floor((reaper.GetCursorPosition() or 0) * 1000))
+    changed, state.comment_at_cursor = reaper.ImGui_Checkbox(ctx, cursor_label, state.comment_at_cursor)
+    if primary_button("Post comment") then start_job(post_comment) end
+    if not state.recording then
+      if reaper.ImGui_Button(ctx, "Record voice memo") then start_voice_record() end
+      local input = reaper.GetInputChannelName(state.voice_input or 0) or "No input"
+      reaper.ImGui_TextWrapped(ctx, "Microphone: " .. input .. ". Change it in Settings.")
+    end
+    if reaper.ImGui_Button(ctx, state.show_proposals and "Hide edit proposal" or "Suggest a cut or loop") then state.show_proposals = not state.show_proposals end
+    if state.show_proposals then
+      section_title("Suggest an edit", "cut or repeat a section")
+      reaper.ImGui_TextWrapped(ctx, "Make a time selection in REAPER. The proposal leaves the original audio unchanged.")
+      local sel_start, sel_end = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
+      if not sel_end or sel_end <= (sel_start or 0) then
+        muted_text("Make a time selection in REAPER to propose a cut or loop.")
+      else
+        muted_text("Selection: " .. fmt_ts(math.floor(sel_start * 1000)) .. "-" .. fmt_ts(math.floor(sel_end * 1000)))
+        muted_text("Proposal note (optional)")
+        reaper.ImGui_SetNextItemWidth(ctx, content_width())
+        changed, state.propose_note = reaper.ImGui_InputText(ctx, "##proposal_note", state.propose_note)
+        if primary_button("Propose cut") then propose_edit("cut", sel_start, sel_end) end
+        reaper.ImGui_SameLine(ctx)
+        if primary_button("Propose loop") then propose_edit("loop", sel_start, sel_end) end
+        muted_text("Loop repeats")
+        reaper.ImGui_SetNextItemWidth(ctx, content_width())
+        changed, state.loop_count = reaper.ImGui_SliderInt(ctx, "##loop_count", state.loop_count, 2, 8, "x%d")
+      end
 
-  section_title("Comments", #state.comments > 0 and (#state.comments .. " in this project") or "")
-  if reaper.ImGui_Button(ctx, "Refresh comments") then start_job(load_comments) end
-  if #state.comments > 0 then
-    if reaper.ImGui_Button(ctx, "Drop timeline markers") then sync_comment_markers() end
-    reaper.ImGui_SameLine(ctx)
-    if reaper.ImGui_Button(ctx, "Clear Take markers") then
-      local removed = clear_take_markers()
-      state.status = removed == 0 and "No Take markers to clear." or ("Cleared " .. removed .. " Take marker(s).")
     end
-  end
-  if #state.comments == 0 then
-    empty_state("No comments yet.")
-  else
-    local vis = reaper.ImGui_BeginChild(ctx, "comment_list", 0, 220)
-    if vis then
-      for _, c in ipairs(state.comments) do
-        draw_comment_item(c)
-      end
-      if state.scroll_comments then
-        reaper.ImGui_SetScrollHereY(ctx, 1.0)
-        state.scroll_comments = false
-      end
-    end
-    end_child(vis)
-  end
-  reaper.ImGui_SetNextItemWidth(ctx, content_width())
-  changed, state.comment_body = reaper.ImGui_InputText(ctx, "New comment", state.comment_body)
-  local cursor_label = "At edit cursor @" .. fmt_ts(math.floor((reaper.GetCursorPosition() or 0) * 1000))
-  changed, state.comment_at_cursor = reaper.ImGui_Checkbox(ctx, cursor_label, state.comment_at_cursor)
-  if primary_button("Post comment") then start_job(post_comment) end
-  reaper.ImGui_SameLine(ctx)
-  if state.recording then
-    if reaper.ImGui_Button(ctx, "Stop and post voice memo") then stop_and_post_voice() end
-  else
-    if reaper.ImGui_Button(ctx, "Record voice memo") then start_voice_record() end
   end
 end
 
@@ -1976,13 +2019,12 @@ local function loop()
     end
   end
 
-  reaper.ImGui_SetNextWindowSize(ctx, 450, 700, reaper.ImGui_Cond_FirstUseEver())
+  reaper.ImGui_SetNextWindowSize(ctx, 480, 700, reaper.ImGui_Cond_FirstUseEver())
   reaper.ImGui_SetNextWindowSizeConstraints(ctx, 360, 480, -1, -1)
   local visible, open = reaper.ImGui_Begin(ctx, "Take", true)
   if visible then
     reaper.ImGui_TextColored(ctx, COLORS.ink, "Take")
     reaper.ImGui_SameLine(ctx)
-    muted_text(state.recording and "recording voice memo" or "Reaper collaboration panel")
     if reaper.ImGui_Button(ctx, state.show_settings and "Close settings" or "Settings") then
       state.show_settings = not state.show_settings
     end
@@ -1992,6 +2034,11 @@ local function loop()
         "Take v" .. state.update_available .. " is out - ReaPack > Synchronize packages.")
       reaper.ImGui_SameLine(ctx)
       if reaper.ImGui_SmallButton(ctx, "Dismiss") then state.update_available = nil end
+    end
+
+    -- Recording controls stay reachable while viewing settings or another section.
+    if state.recording then
+      if primary_button("Stop and post voice memo", content_width()) then stop_and_post_voice() end
     end
 
     if state.show_settings then

@@ -30,23 +30,21 @@ The Reaper panel talks to the Take web app over HTTPS. Your collaborator doesn't
 
 ## Connect
 
-1. Go to [takeaudio.com/settings/reaper](https://takeaudio.com/settings/reaper), create an API token, and copy the full token once.
-2. In the Take panel inside Reaper, open **Settings**.
-3. Paste `https://takeaudio.com` into **Server URL**.
-4. Paste the full `take_...` token into **API token**, then click **Done**.
-5. Your paid projects appear. Click one to see its stems and roughs.
+1. Open Take in REAPER, open **Settings**, then click **Connect to Take**.
+2. Approve the connection in your browser.
+3. Choose a project. Its owner needs a paid plan to use the REAPER client.
 
-The ReaPack URL installs the script. It is not the Server URL.
+Manual server and API token settings are available in Settings under **Advanced connection settings**.
 
 ## Pull
 
 Click **Import** next to any stem. Take downloads the original WAV and drops it on a new track at its stored timecode. Nothing leaves your DAW.
 
-**Import all** pulls every stem you don't already have. Stems whose files are already in your session are labeled **(in session)**.
+**Import all stems** pulls every stem you don't already have. Stems whose files are already in your session are labeled **(in session)**.
 
 ## Push
 
-Select a track, optionally type a name, click **Push stem**. Take renders that track and uploads it as a new stem on the project.
+Select a track, optionally type a name, click **Render and upload selected track**. Take renders that track and uploads it as a new stem on the project.
 
 Click **Render and push as rough** at the top of a project. Take renders your master mix and uploads it as the current rough.
 
@@ -58,7 +56,7 @@ The web app generates the compressed playback copy after upload. A pushed file s
 
 The **Comments** section lists the discussion on the current rough. It refreshes itself every 30 seconds while a project is open, so collaborator feedback shows up as you work.
 
-Timeline comments have **Jump** and **Marker** actions. Jump moves Reaper's edit cursor to the comment time. Marker drops a Reaper project marker named `Take: ...` at that timestamp. **Drop timeline markers** adds markers for every timestamped Take comment, and **Clear Take markers** removes only markers with the `Take:` prefix.
+Timeline comments have **Jump to comment** and **Add marker** actions. Jump moves Reaper's edit cursor to the comment time. Marker drops a Reaper project marker named `Take: ...` at that timestamp. **Drop timeline markers** adds markers for every timestamped Take comment, and **Clear Take markers** removes only markers with the `Take:` prefix.
 
 Type into **New comment** and press **Post comment**. With **At edit cursor** checked, it pins to that timecode on the rough. Unchecked, it's a project-level note.
 
@@ -66,7 +64,7 @@ Type into **New comment** and press **Post comment**. With **At edit cursor** ch
 
 **Stop and post voice memo** uploads the recording as a voice comment. The edit cursor position at record time becomes the comment's timecode.
 
-For posted voice memo comments, **Voice** downloads the memo through a short-lived Take URL and opens it with your system audio player.
+For posted voice memo comments, **Open voice memo** downloads the memo through a short-lived Take URL and opens it with your system audio player.
 
 Pick which audio input the memo records from under **Settings > Voice memos** (defaults to input 1). The choice is remembered between sessions.
 
