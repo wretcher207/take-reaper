@@ -1,10 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <index version="1" name="Take">
+  <metadata>
+    <description><![CDATA[Take by Dead Pixel Design: a REAPER panel for sharing stems, rough mixes and timestamped comments with the people you make music with. https://takeaudio.com]]></description>
+    <link rel="website">https://takeaudio.com</link>
+  </metadata>
   <category name="Take">
-    <reapack name="Take.lua" type="script" desc="Take docked panel">
+    <reapack name="Take.lua" type="script" desc="Take: share stems, roughs and timestamped comments">
       <metadata>
-        <description><![CDATA[Take — the layer between your DAW and the people you make music with.]]></description>
+        <description><![CDATA[Take is a docked panel for working on songs with other people. Pull a collaborator's stems onto your timeline at their timecode, push a rough mix in one click, read and answer comments pinned to the second they are about, and record a voice memo without leaving the session.
+
+Requires ReaImGui (install it from ReaPack). The script is free to install; connecting it needs a Take account on the paid plan ($8/month, paid by the project owner, collaborators ride along). The web app at takeaudio.com is free.]]></description>
         <link rel="website">https://takeaudio.com</link>
+        <link rel="website" href="https://github.com/wretcher207/take-reaper">Source on GitHub</link>
       </metadata>
       <version name="0.8.3" author="Dead Pixel Design" time="2026-09-21T01:00:50Z">
         <changelog><![CDATA[Clearer project navigation with Comments, Import stems, and Upload audio sections. Upload buttons name what they render. Advanced connection settings and edit proposals stay collapsed until opened. Recording controls remain accessible when switching sections. Rough and stem names are kept separately.]]></changelog>
