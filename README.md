@@ -89,6 +89,6 @@ The panel checks once per launch whether a newer Take version is on ReaPack and 
 
 Free: web app, text comments, stem and rough uploads, 5GB storage.
 
-$12/month: Reaper integration, voice memos, cut and loop proposals, 100GB storage, 12-month history, public wrap pages.
+$8/month: Reaper integration, voice memos, cut and loop proposals, 100GB storage, 12-month history, public wrap pages.
 
 Project owner pays. Collaborators ride along.
