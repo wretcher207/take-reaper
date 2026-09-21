@@ -46,7 +46,7 @@ Click **Import** next to any stem. Take downloads the original WAV and drops it 
 
 Select a track, optionally type a name, click **Render and upload selected track**. Take renders that track and uploads it as a new stem on the project.
 
-Click **Render and push as rough** at the top of a project. Take renders your master mix and uploads it as the current rough.
+Open **Upload audio** and click **Render and upload rough**. Take renders your master mix and uploads it as the current rough.
 
 These reuse your project's render format. Set it once in **File > Render**. WAV, AIFF, FLAC, or MP3. WAV is the default.
 

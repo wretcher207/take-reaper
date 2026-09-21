@@ -1,3 +1,7 @@
+## Current release: v0.8.3 (2026-09-20)
+
+Published with David's authorization. Take main and take-reaper main are synchronized; live takeaudio.com/reaper/index.xml serves v0.8.3 and both live files match the committed release. This release simplifies Comments / Import stems / Upload audio navigation and connection setup. Native layout checked in an isolated preview; Lua syntax, state tests, and tools/check.js pass. The installed REAPER action loads this repository's Take.lua. Older notes below are historical and superseded.
+
 > status: v0.8.2 PREPARED, NOT PUBLISHED; v0.8.1 still live; v0.9.0 scoped | one-liner: v0.8.2 safety release is staged in both repos and passes every offline check — it needs David's live REAPER smoke test, then a merge to main, then publish.bat | next: run the v0.8.2 release steps below. v0.9.0's four approved features come after.
 
 # HANDOFF — Take for Reaper
