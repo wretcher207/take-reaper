@@ -11,7 +11,8 @@ REM    3. Syntax-checks Take.lua with luac.
 REM    4. Copies Take.lua + index.xml into the take web app, which serves the
 REM       channel ReaPack ACTUALLY reads: https://takeaudio.com/reaper/*
 REM       (NOT raw.githubusercontent.com - ReaPack never reads that).
-REM    5. Commits/pushes both repos and deploys take to production (Vercel).
+REM    5. Commits/pushes both repos. The push to take's main starts the
+REM       production deploy (GitHub Actions -> Netlify).
 REM    6. Verifies the new version is live at takeaudio.com.
 REM
 REM  Assumed layout (the two repos are siblings):
@@ -88,9 +89,8 @@ if not exist "%WEB%\" (
 )
 
 REM --- The take repo must be on main, clean, and level with origin ---
-REM  Steps 5 and 6 below push the take repo and deploy it to production from
-REM  WHATEVER it has checked out. `vercel --prod` uploads the working directory,
-REM  not a commit, so a feature branch or a dirty tree would put unmerged app
+REM  Step 5 below pushes the take repo's main, and that push deploys
+REM  takeaudio.com. A feature branch or a dirty tree would put unmerged app
 REM  code on takeaudio.com - including code that expects a migration nobody has
 REM  applied yet. A Reaper release must never be the thing that deploys that.
 pushd "..\take"
@@ -102,16 +102,15 @@ if /i not "%TBRANCH%"=="main" (
   echo a feature branch would deploy unmerged code to takeaudio.com.
   popd & pause & exit /b 1
 )
-REM  --porcelain, not `git diff --quiet HEAD`: untracked files are uploaded by
-REM  vercel too, and a half-finished migration or route sitting untracked is
-REM  exactly the thing this guard exists to keep off takeaudio.com.
+REM  --porcelain, not `git diff --quiet HEAD`: a half-finished migration or
+REM  route sitting untracked is exactly the thing this guard exists to keep
+REM  out of the release commit.
 set "TDIRTY="
 for /f "delims=" %%s in ('git status --porcelain') do set "TDIRTY=1"
 if defined TDIRTY (
   echo.
-  echo The take repo has uncommitted or untracked changes. vercel --prod uploads
-  echo the working directory as-is, so those files would go live. Commit, stash,
-  echo or clean them first:
+  echo The take repo has uncommitted or untracked changes. Commit, stash, or
+  echo clean them first so the release commit carries only the Reaper files:
   git status --short
   popd & pause & exit /b 1
 )
@@ -155,27 +154,29 @@ pushd "..\take"
 git add apps/web/public/reaper/Take.lua apps/web/public/reaper/index.xml apps/reaper/Take.lua apps/reaper/index.xml
 git commit -m "Reaper: publish Take v%VERSION%" >nul 2>nul
 git push
-
-echo.
-where vercel >nul 2>nul
-if not errorlevel 1 (
-  echo Deploying take to production ^(Vercel^)...
-  call vercel --prod --yes
-) else (
-  echo vercel CLI not found - deploy take manually: vercel --prod --yes
-)
+if errorlevel 1 ( echo take push failed. & popd & pause & exit /b 1 )
+echo Pushed take main. GitHub Actions deploys it to Netlify in a few minutes.
 popd
 
 REM --- Verify the channel ReaPack actually reads --------------------
+REM  Waits up to ten minutes for the deploy, checking every 30 seconds.
 echo.
-echo Verifying https://takeaudio.com/reaper/index.xml ...
+echo Waiting for v%VERSION% at https://takeaudio.com/reaper/index.xml ...
+set /a TRIES=0
+:waitlive
 curl -s https://takeaudio.com/reaper/index.xml | findstr /c:"name=\"%VERSION%\"" >nul
-if errorlevel 1 (
-  echo WARNING: v%VERSION% not visible at takeaudio.com yet.
-  echo The deploy may still be propagating - re-check in a minute.
-) else (
-  echo OK: v%VERSION% is live at takeaudio.com/reaper/index.xml
-)
+if not errorlevel 1 goto live
+set /a TRIES+=1
+if %TRIES% GEQ 20 goto notlive
+timeout /t 30 /nobreak >nul
+goto waitlive
+:notlive
+echo WARNING: v%VERSION% still not visible after ten minutes.
+echo Check the Deploy workflow on GitHub and the Netlify deploy log.
+goto afterverify
+:live
+echo OK: v%VERSION% is live at takeaudio.com/reaper/index.xml
+:afterverify
 echo.
 echo Then in REAPER: ReaPack ^> Synchronize packages, and re-open the Take panel.
 pause

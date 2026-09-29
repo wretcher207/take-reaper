@@ -1,5 +1,5 @@
 -- @description Take for Reaper
--- @version 0.8.3
+-- @version 0.8.4
 -- @author Dead Pixel Design
 -- @about
 --   A docked panel that connects this Reaper session to your Take projects.
@@ -460,10 +460,12 @@ end
 
 -- Clean up stale temp files from previous sessions on startup. Any render/voice
 -- temp from a prior run is dead weight — the only live temps are created
--- during the current session. Also catches curl resp/req JSON bodies.
+-- during the current session. Also catches curl resp/req JSON bodies, and
+-- take_part_* downloads a closed panel never finished. Imported stems are
+-- take_<stem uuid>_*, and a uuid is hex, so no prefix here can match one.
 local function cleanup_stale_temps()
   local base = reaper.GetResourcePath() .. "/Scripts/"
-  local prefixes = { "take_render_", "take_voice_", "take_resp", "take_req", "take_upload_resp", "take_prog_", "take_job_" }
+  local prefixes = { "take_render_", "take_voice_", "take_resp", "take_req", "take_upload_resp", "take_prog_", "take_job_", "take_part_" }
   for _, prefix in ipairs(prefixes) do
     local i = 0
     while true do
@@ -510,11 +512,15 @@ end
 -- Every caller passes `-o <file> -w "%{http_code}"`, so curl's stdout is just
 -- the 3-digit code. Sync mode reads it out of ExecProcess's "<exit>\n<code>";
 -- async mode redirects that stdout into a file and reads it back when done.
+-- Second return: curl's exit code (nil when unknown). A dropped connection or
+-- a --max-time abort still reports http 200, so a download has to check both.
+-- Callers that only take the first value behave exactly as before.
 local JOB_SEQ = 0
 local function http_run(cmd, timeout_ms, progress_file)
   local co, ismain = coroutine.running()
   if not co or ismain then
-    return status_from(reaper.ExecProcess(cmd, timeout_ms))
+    local out = reaper.ExecProcess(cmd, timeout_ms)
+    return status_from(out), tonumber(tostring(out or ""):match("^(%-?%d+)"))
   end
 
   JOB_SEQ = JOB_SEQ + 1
@@ -537,12 +543,15 @@ local function http_run(cmd, timeout_ms, progress_file)
     --   * cmd's built-ins (move) reject forward-slash paths, so every path the
     --     batch touches is backslashed (io.open on our side takes either).
     --   * cmd.exe by absolute path — same PATH-resolution defense as curl_bin.
+    -- The rc line puts its redirect first on purpose: "echo rc=1>>f" would
+    -- read "1>>" as a handle redirect and drop the digit.
     local bs = function(p) return (p:gsub("/", "\\")) end
     local stderr_bat = progress_file and q(bs(progress_file)) or "nul"
     script = tmp_path("job_" .. jid .. ".bat")
     write_file(script,
       "@echo off\r\n" ..
       cmd:gsub("%%", "%%%%") .. " > " .. q(bs(code_tmp)) .. " 2>" .. stderr_bat .. "\r\n" ..
+      ">>" .. q(bs(code_tmp)) .. " echo rc=%ERRORLEVEL%\r\n" ..
       "move /y " .. q(bs(code_tmp)) .. " " .. q(bs(done)) .. " >nul 2>nul\r\n")
     local cmdexe = (os.getenv("SystemRoot") or "C:\\Windows") .. "\\System32\\cmd.exe"
     reaper.ExecProcess(cmdexe .. ' /c start "" /b cmd /c ' .. q(bs(script)), -2)
@@ -551,6 +560,7 @@ local function http_run(cmd, timeout_ms, progress_file)
     write_file(script,
       "#!/bin/sh\n" ..
       cmd .. " > " .. q(code_tmp) .. " 2>" .. stderr_sh .. "\n" ..
+      "echo \"rc=$?\" >> " .. q(code_tmp) .. "\n" ..
       "mv " .. q(code_tmp) .. " " .. q(done) .. "\n")
     -- The trailing `&` (inside sh -c) is what actually detaches; without the
     -- stdio redirects ExecProcess still waits on the pipe and we gain nothing.
@@ -570,10 +580,15 @@ local function http_run(cmd, timeout_ms, progress_file)
     coroutine.yield()
   end
 
+  -- `done` holds curl's stdout (the http code) then "rc=<exit>". Parse the code
+  -- from the part before rc= only: when curl never launched the file is just
+  -- "rc=9009" (or 127), which must stay "no response" (-1), not http 900.
   local code = read_file(done) or ""
   safe_remove(script); safe_remove(done)
-  if code == "" then return -1 end
-  return tonumber(code:match("%d%d%d")) or 0
+  local out, rc = code:match("^(.-)rc=(%-?%d+)")
+  if not out then out = code end
+  if out == "" then return -1, tonumber(rc) end
+  return tonumber(out:match("%d%d%d")) or 0, tonumber(rc)
 end
 
 -- Start an async network job. Body runs as a coroutine pumped by loop(): it
@@ -650,17 +665,82 @@ local function http_post_json(path, tbl)
   return http, body
 end
 
--- Download a (pre-signed) URL to dest. Returns http_status. total (optional,
--- bytes) improves the progress line from "12.4 MB" to a percentage.
-local function http_download(url, dest, total)
+-- Download a (pre-signed) URL to dest. Returns http_status and curl's exit
+-- code. total (optional, bytes) improves the progress line from "12.4 MB" to a
+-- percentage. --fail keeps an error body (an expired URL's S3 XML) out of dest.
+-- A stall is what ends a download: under 1 KB/s for a full minute. The old
+-- flat 110s cap cut big stems off mid-file on slow lines. max_time (seconds)
+-- is only a backstop; http_run waits that long plus a margin, so curl always
+-- exits on its own first. Downloads always run inside a job, never blocking.
+local DOWNLOAD_MAX_TIME = 3600
+local function http_download(url, dest, total, max_time)
   url = safe_url(url)
   if not url then return 0 end
+  max_time = max_time or DOWNLOAD_MAX_TIME
   state.transfer = { kind = "down", path = dest, total = tonumber(total) }
-  local cmd = curl_bin() .. " -s --connect-timeout 10 --max-time 110 -L -o " .. q(dest)
-    .. " -w " .. q("%{http_code}") .. " " .. q(url)
-  local http = http_run(cmd, 120000)
+  local cmd = curl_bin() .. " -s --fail --connect-timeout 10"
+    .. " --speed-limit 1024 --speed-time 60 --max-time " .. max_time
+    .. " -L -o " .. q(dest) .. " -w " .. q("%{http_code}") .. " " .. q(url)
+  local http, rc = http_run(cmd, (max_time + 10) * 1000)
   state.transfer = nil
-  return http
+  return http, rc
+end
+
+-- Download into a private take_part_* file. Returns its path only when the
+-- transfer really finished: http 200 AND curl exit 0 (a dropped connection or
+-- a timeout still reports 200) AND a non-empty file. Anything else removes the
+-- part and returns nil plus a reason for the status line. The caller owns the
+-- part; nothing another item could be using is ever written or removed here.
+local function download_part(url, tag, total)
+  local part = tmp_path("part_" .. os.time() .. "_" .. math.random(100000, 999999) .. "_" .. tag)
+  local http, rc = http_download(url, part, total)
+  if http ~= 200 or rc ~= 0 or file_size(part) == 0 then
+    safe_remove(part)
+    if http ~= 200 then return nil, tostring(http) end
+    if rc ~= 0 then return nil, "incomplete, curl " .. tostring(rc) end
+    return nil, "empty file"
+  end
+  return part
+end
+
+-- Byte-compare two files in 1 MB chunks. Inside a job it yields every 16 MB
+-- so a big stem doesn't stall the panel; callers must re-check anything the
+-- user could change across those frames.
+local function files_equal(a, b)
+  if file_size(a) ~= file_size(b) then return false end
+  local fa, fb = io.open(a, "rb"), io.open(b, "rb")
+  local same = fa ~= nil and fb ~= nil
+  local n = 0
+  while same do
+    local x, y = fa:read(1048576), fb:read(1048576)
+    if x ~= y then same = false elseif not x then break end
+    n = n + 1
+    local co, ismain = coroutine.running()
+    if co and not ismain and n % 16 == 0 then coroutine.yield() end
+  end
+  if fa then fa:close() end
+  if fb then fb:close() end
+  return same
+end
+
+-- Give a finished part file a lasting name, prefix_name first, then
+-- prefix_vN_name. Never overwrites: a name already taken by identical bytes is
+-- reused (the part is dropped), different bytes move on to the next N. The
+-- prefix (a stem id) stays in every name so stem presence still finds it.
+-- os.rename replaces silently on POSIX and fails on Windows, so it only ever
+-- targets a name just seen to be free. Returns the path and whether this call
+-- created it (false = an existing identical file was reused), or nil.
+local function place_download(part, prefix, name)
+  for n = 1, 99 do
+    local path = tmp_path(prefix .. (n == 1 and "" or ("_v" .. n)) .. "_" .. name)
+    if file_exists(path) then
+      if files_equal(path, part) then safe_remove(part); return path, false end
+    elseif os.rename(part, path) then
+      return path, true
+    end
+  end
+  safe_remove(part)
+  return nil
 end
 
 -- PUT a file to a (pre-signed) upload URL, streamed. Returns http_status plus
@@ -824,7 +904,8 @@ end
 local function check_for_update()
   if not VERSION then return end
   local dest = tmp_path("resp_update.xml")
-  local http = http_download(state.base_url .. "/reaper/index.xml", dest)
+  -- A small file: keep the short cap so a bad link can't hold the job slot.
+  local http = http_download(state.base_url .. "/reaper/index.xml", dest, nil, 110)
   if http ~= 200 then return end
   local newest = (read_file(dest) or ""):match('<version name="([%d%.]+)"')
   if newest and version_newer(newest, VERSION) then
@@ -1159,10 +1240,13 @@ local function open_voice_memo(c)
     local data = json_decode(body)
     if not data or not data.url then state.status = "No voice memo URL returned."; return end
 
+    -- Same private-part download as stems: a failed or repeat download never
+    -- truncates or overwrites a memo a player may still have open.
     local filename = safe_filename(data.filename or ("voice_" .. comment_key(c) .. ".wav"))
-    local dest = tmp_path("voice_" .. filename)
-    local dl = http_download(data.url, dest)
-    if dl ~= 200 then state.status = "Voice memo download failed (" .. dl .. ")."; return end
+    local part, why = download_part(data.url, "voice")
+    if not part then state.status = "Voice memo download failed (" .. why .. ")."; return end
+    local dest = place_download(part, "voice", filename)
+    if not dest then state.status = "Couldn't save the voice memo in REAPER's Scripts folder."; return end
     open_file(dest)
     state.status = "Opened voice memo."
   end)
@@ -1312,9 +1396,12 @@ end
 -- job coroutine (callers wrap it). Failure statuses are set here; returns true
 -- on success so callers can set their own summary line.
 local function import_stem_now(stem, target_project, take_project_id)
-  if not target_project or not reaper.ValidatePtr(target_project, "ReaProject*")
-      or reaper.EnumProjects(-1) ~= target_project
-      or not state.project or state.project.id ~= take_project_id then
+  local function on_target()
+    return target_project and reaper.ValidatePtr(target_project, "ReaProject*")
+      and reaper.EnumProjects(-1) == target_project
+      and state.project and state.project.id == take_project_id
+  end
+  if not on_target() then
     state.status = "Return to the original project tab and try the pull again."
     return false
   end
@@ -1325,17 +1412,27 @@ local function import_stem_now(stem, target_project, take_project_id)
   if not data or not data.url then state.status = "No download URL returned."; return false end
 
   -- Prefix with the stem id so imports never collide by filename across
-  -- projects, and re-importing never reuses a path the project still holds open
-  -- (the Windows failure case). #15.
+  -- projects (#15), and stem presence can spot them in the session. Each
+  -- attempt downloads into its own part file (TAKE-05): a repeat pull of a stem
+  -- already in the session must never write to, or delete, the file its
+  -- existing item plays from. Only a finished download gets a lasting name.
+  local safe_id = safe_filename(tostring(stem.id))
   local safe_name = safe_filename(data.filename or (tostring(stem.name or "stem") .. ".wav"))
-  local dest = tmp_path(safe_filename(tostring(stem.id)) .. "_" .. safe_name)
-  local dl = http_download(data.url, dest, data.size_bytes or data.sizeBytes)
-  if dl ~= 200 then state.status = "Download failed (" .. dl .. ")."; return false end
+  local part, why = download_part(data.url, safe_id, data.size_bytes or data.sizeBytes)
+  if not part then state.status = "Download failed (" .. why .. ")."; return false end
 
-  if not reaper.ValidatePtr(target_project, "ReaProject*")
-      or reaper.EnumProjects(-1) ~= target_project
-      or not state.project or state.project.id ~= take_project_id then
-    safe_remove(dest)
+  if not on_target() then
+    safe_remove(part) -- only this attempt's own file; never a source already in the session
+    state.status = "Project tab changed during download. Return to it and pull again."
+    return false
+  end
+
+  local dest, created = place_download(part, safe_id, safe_name)
+  if not dest then state.status = "Couldn't save the stem in REAPER's Scripts folder."; return false end
+  -- Comparing against an earlier copy can yield on a big file, so look again.
+  -- Undo only a file this attempt created; a reused one belongs to the session.
+  if not on_target() then
+    if created then safe_remove(dest) end
     state.status = "Project tab changed during download. Return to it and pull again."
     return false
   end
@@ -1730,21 +1827,16 @@ local function start_pairing()
   state.status = "Waiting for you to approve Take in your browser…"
 end
 
--- Called every frame while a pairing is in flight; throttled to the server's
--- interval. Saves the token and loads projects the moment approval lands.
-local function poll_pairing()
-  local p = state.pairing
-  if not p then return end
-  local now = reaper.time_precise()
-  if now > p.deadline then
-    state.pairing = nil
-    state.status = "Connect timed out. Open Settings and try again."
-    return
-  end
-  if now < p.next_poll then return end
-  p.next_poll = now + (p.interval or 2) -- honor the server-provided interval (#26)
+-- Pairing polls run as ordinary async jobs (TAKE-08). A synchronous poll froze
+-- the panel for up to 20s per try on a dead network, for the whole pairing
+-- window, and Cancel couldn't be clicked. Now at most one poll is in flight,
+-- the next is scheduled when it finishes (not when it starts), and transient
+-- failures back off from the server's interval up to PAIR_MAX_DELAY.
+local PAIR_MAX_DELAY = 30
 
-  local http, body = http_get_json("/api/reaper/pair/poll?device_code=" .. p.device_code)
+-- Runs inside the poll's job with that poll's result.
+local function finish_pairing_poll(p, http, body)
+  if state.pairing ~= p then return end -- cancelled or restarted meanwhile
   if http == 404 then
     -- The server doesn't know this pairing (expired and cleaned up, or a stale
     -- device code). Waiting longer can't fix it — fail now, not at the deadline.
@@ -1752,9 +1844,17 @@ local function poll_pairing()
     state.status = "Connect failed (not-found). Open Settings and try again."
     return
   end
-  if http ~= 200 then return end -- transient; keep waiting until the deadline
-  local ok, data = pcall(json_decode, body)
-  if not ok or type(data) ~= "table" then return end
+  local ok, data = false, nil
+  if http == 200 then ok, data = pcall(json_decode, body) end
+  if not ok or type(data) ~= "table" then
+    -- Transient (offline, 5xx, garbage): keep trying until the deadline, slower each time.
+    p.failures = (p.failures or 0) + 1
+    p.next_poll = reaper.time_precise()
+      + math.min((p.interval or 2) * 2 ^ p.failures, PAIR_MAX_DELAY)
+    return
+  end
+  p.failures = 0
+  p.next_poll = reaper.time_precise() + (p.interval or 2) -- honor the server-provided interval (#26)
 
   if data.status == "approved" and data.token then
     state.pairing = nil
@@ -1762,12 +1862,44 @@ local function poll_pairing()
     reaper.SetExtState(EXT, "token", state.token, true)
     state.show_settings = false
     state.status = "Connected."
-    start_job(load_projects)
+    load_projects() -- already in the job slot; start_job here would find it busy
   elseif data.status == "expired" or data.status == "denied" or data.status == "not-found" then
     state.pairing = nil
     state.status = "Connect failed (" .. tostring(data.status) .. "). Open Settings and try again."
   end
   -- "pending": the user hasn't approved yet; keep waiting silently.
+end
+
+-- Called every frame while a pairing is in flight. Starts a poll when one is
+-- due and the job slot is free; a user action already holding the slot goes
+-- first and the poll simply waits for it.
+local function poll_pairing()
+  local p = state.pairing
+  if not p then return end
+  -- A poll still running gets to land (an approval right at the deadline counts).
+  if p.job and state.job == p.job then return end
+  local now = reaper.time_precise()
+  if now > p.deadline then
+    state.pairing = nil
+    state.status = "Connect timed out. Open Settings and try again."
+    return
+  end
+  if now < p.next_poll or state.job then return end
+  p.next_poll = now + PAIR_MAX_DELAY -- fallback if the job dies; finish_pairing_poll reschedules
+  start_job(function()
+    finish_pairing_poll(p, http_get_json("/api/reaper/pair/poll?device_code=" .. p.device_code))
+  end)
+  p.job = state.job
+end
+
+-- Cancel works mid-poll: drop the poll's job so the slot frees now, not when
+-- curl gives up. The detached curl exits on its own; its temp files
+-- (take_job_*, take_resp_*) go in the next startup sweep.
+local function cancel_pairing()
+  local p = state.pairing
+  state.pairing = nil
+  state.status = ""
+  if p and p.job and state.job == p.job then state.job = nil end
 end
 
 local function draw_settings()
@@ -1776,7 +1908,7 @@ local function draw_settings()
   muted_text("Connect")
   if state.pairing then
     reaper.ImGui_TextWrapped(ctx, "Waiting for you to approve Take in your browser. Come back here once you have.")
-    if reaper.ImGui_Button(ctx, "Cancel") then state.pairing = nil; state.status = "" end
+    if reaper.ImGui_Button(ctx, "Cancel") then cancel_pairing() end
   else
     reaper.ImGui_TextWrapped(ctx, "Approve the connection in your browser, then return to REAPER.")
     if primary_button("Connect to Take", content_width()) then start_job(start_pairing) end

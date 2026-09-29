@@ -13,6 +13,10 @@ Requires ReaImGui (install it from ReaPack). The script is free to install; conn
         <link rel="website">https://takeaudio.com</link>
         <link rel="website" href="https://github.com/wretcher207/take-reaper">Source on GitHub</link>
       </metadata>
+      <version name="0.8.4" author="Dead Pixel Design" time="2026-09-29T03:30:00Z">
+        <changelog><![CDATA[Re-importing a stem that's already in your session leaves the existing file alone. Each download goes to its own temporary file and is only used once it's complete, so a cancelled, expired or dropped download can't damage audio you already have. Big stems on slow connections finish instead of getting cut off partway. Connect doesn't freeze the panel while it waits for your browser, and Cancel works right away.]]></changelog>
+        <source main="main">https://takeaudio.com/reaper/Take.lua</source>
+      </version>
       <version name="0.8.3" author="Dead Pixel Design" time="2026-09-21T01:00:50Z">
         <changelog><![CDATA[Clearer project navigation with Comments, Import stems, and Upload audio sections. Upload buttons name what they render. Advanced connection settings and edit proposals stay collapsed until opened. Recording controls remain accessible when switching sections. Rough and stem names are kept separately.]]></changelog>
         <source main="main">https://takeaudio.com/reaper/Take.lua</source>
