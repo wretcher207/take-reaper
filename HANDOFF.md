@@ -1,4 +1,8 @@
-## Current release: v0.8.3 (2026-09-20)
+## Current release: v0.8.4 (2026-09-29)
+
+Published with David's authorization. Fixes TAKE-05 (repeat imports never overwrite or delete a file an existing item uses; downloads go to part files and are checked before use; stall detection replaces the 110 s cap) and TAKE-08 (pairing polls are async jobs, one in flight, capped backoff, Cancel frees the slot). Take main (`7c4478f`) and take-reaper main (`ac75120`) are synchronized; takeaudio.com/reaper/index.xml serves 0.8.4. Checks: luac, tools/check.js, take's tests/reaper-state.test.lua (135 new checks), real-curl repro (16/16 keep the original intact), and a live smoke test in David's REAPER (imports, repeat import, tab-switch cancel, pairing + Cancel, stem push). publish.bat/.sh no longer call vercel: pushing take's main deploys to Netlify via GitHub Actions; the scripts wait for the live feed. Details: take/docs/security/hostile-review-2026-09-28.md.
+
+## Previous release: v0.8.3 (2026-09-20)
 
 Published with David's authorization. Take main and take-reaper main are synchronized; live takeaudio.com/reaper/index.xml serves v0.8.3 and both live files match the committed release. This release simplifies Comments / Import stems / Upload audio navigation and connection setup. Native layout checked in an isolated preview; Lua syntax, state tests, and tools/check.js pass. The installed REAPER action loads this repository's Take.lua. Older notes below are historical and superseded.
 
