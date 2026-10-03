@@ -1,5 +1,5 @@
 -- @description Take for Reaper
--- @version 0.8.4
+-- @version 0.8.5
 -- @author Dead Pixel Design
 -- @about
 --   A docked panel that connects this Reaper session to your Take projects.
@@ -74,6 +74,7 @@ local state = {
   stems = {},
   comments = {},
   comment_body = "",
+  project_drafts = {}, -- unsent text stays with its Take project for this panel session
   comment_at_cursor = true,
   push_name = "",
   status = "",
@@ -750,6 +751,7 @@ end
 -- Instead of -s we use -# (progress bar) with stderr routed to a file, which is
 -- what the panel reads back to show a live percentage — uploads always run
 -- inside a job, so the sync path (where stderr is discarded) never carries -#.
+local UPLOAD_MAX_TIME = 3600 -- original-upload tickets last an hour
 local function http_upload(url, filepath, content_type)
   url = safe_url(url)
   if not url then return 0, "" end
@@ -757,16 +759,19 @@ local function http_upload(url, filepath, content_type)
   local out_file = tmp_path("upload_resp_" .. REQ_SEQ .. ".txt")
   local prog_file = tmp_path("prog_" .. REQ_SEQ .. ".txt")
   state.transfer = { kind = "up", prog = prog_file, total = file_size(filepath) }
-  local cmd = curl_bin() .. " -# --connect-timeout 10 --max-time 290 -X PUT -T " .. q(filepath)
+  local cmd = curl_bin() .. " -# --connect-timeout 10 --speed-limit 1024 --speed-time 90"
+    .. " --max-time " .. UPLOAD_MAX_TIME .. " -X PUT -T " .. q(filepath)
     .. " -H " .. q("Content-Type: " .. content_type)
     .. " -o " .. q(out_file)
     .. " -w " .. q("%{http_code}")
     .. " " .. q(url)
-  local http = http_run(cmd, 300000, prog_file)
+  local http, rc = http_run(cmd, (UPLOAD_MAX_TIME + 10) * 1000, prog_file)
   state.transfer = nil
   safe_remove(prog_file)
   local body = read_file(out_file) or ""
   retire_temps(nil, out_file)
+  -- curl can receive the HTTP headers and still time out before completing.
+  if http >= 200 and http < 300 and rc ~= 0 then return 0, body end
   return http, body
 end
 
@@ -1017,14 +1022,35 @@ local function refresh_stem_presence()
   state.stem_presence = present
 end
 
+local function switch_project_draft(project_id)
+  local current_id = state.project and state.project.id
+  if current_id == project_id then return end
+  if current_id then
+    state.project_drafts[current_id] = {
+      comment_body = state.comment_body, push_name = state.push_name,
+      rough_label = state.rough_label, propose_note = state.propose_note,
+      comment_at_cursor = state.comment_at_cursor, loop_count = state.loop_count,
+    }
+  end
+  local draft = state.project_drafts[project_id] or {}
+  state.comment_body = draft.comment_body or ""
+  state.push_name = draft.push_name or ""
+  state.rough_label = draft.rough_label or ""
+  state.propose_note = draft.propose_note or ""
+  state.comment_at_cursor = draft.comment_at_cursor ~= false
+  state.loop_count = draft.loop_count or 2
+end
+
 local function open_project(p)
   state.status = "Loading " .. tostring(p.name or "project") .. "…"
-  state.comments = {}
-  state.scroll_comments = false
-  state.comments_next_poll = 0 -- restart the live-refresh clock for this project
   local http, body = http_get_json("/api/reaper/projects/" .. p.id)
   if http ~= 200 then state.status = "Couldn't open project (" .. http .. ")."; return end
   local data = json_decode(body)
+  -- Keep the existing view intact until the new project has actually loaded.
+  if not state.project or state.project.id ~= p.id then state.comments = {} end
+  switch_project_draft(p.id)
+  state.scroll_comments = false
+  state.comments_next_poll = 0
   state.project = data and data.project or p
   state.stems = (data and data.stems) or {}
   state.view = "project"
