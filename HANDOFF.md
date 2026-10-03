@@ -1,4 +1,14 @@
-## Current release: v0.8.4 (2026-09-29)
+## Current release: v0.8.5 (2026-10-03)
+
+Published at take-reaper `438e9c2` and Take `22904d4`. Uploads allow up to one hour, stop after 90 seconds below 1 KB/s and require curl exit zero as well as successful HTTP status. Unsent comments, proposals and upload labels stay with their Take project for the current panel session; a failed project refresh keeps the existing view.
+
+Verification: `luac -p`, `node tools/check.js`, Take's 135 existing state/transport checks and five new readiness scenarios all pass. Netlify deploy `6ac1710df2a4508fd1b10419` is live (GitHub Actions run 37154227987, attempt 2). The public script/feed identify 0.8.5 and exactly match the committed source, public directory and companion repository. The first deploy attempt could not resolve the Netlify site; retry succeeded without configuration changes.
+
+Production acceptance in the Take repo: `node scripts/verify-production-neon-r2.mjs --browser` passed for REAPER API upload, original WAV preservation, transcoding, browser stem/rough recovery after lost save responses, and browser device approval/token claim. The test account, project, uploads and pairing were removed and cleanup verified. These were real server/browser paths; the changed desktop functions were covered by Lua harnesses. David's active REAPER session was left alone. No macOS install or hour-long transfer was attempted. See Take's `docs/quality/launch-readiness-2026-10-03.md`.
+
+Routine releases are covered by David's standing authorization. Preserve the pre-existing README, feed metadata and older HANDOFF edits, which remain separate from this release.
+
+## Previous release: v0.8.4 (2026-09-29)
 
 Published with David's authorization. Fixes TAKE-05 (repeat imports never overwrite or delete a file an existing item uses; downloads go to part files and are checked before use; stall detection replaces the 110 s cap) and TAKE-08 (pairing polls are async jobs, one in flight, capped backoff, Cancel frees the slot). Take main (`7c4478f`) and take-reaper main (`ac75120`) are synchronized; takeaudio.com/reaper/index.xml serves 0.8.4. Checks: luac, tools/check.js, take's tests/reaper-state.test.lua (135 new checks), real-curl repro (16/16 keep the original intact), and a live smoke test in David's REAPER (imports, repeat import, tab-switch cancel, pairing + Cancel, stem push). publish.bat/.sh no longer call vercel: pushing take's main deploys to Netlify via GitHub Actions; the scripts wait for the live feed. Details: take/docs/security/hostile-review-2026-09-28.md.
 
