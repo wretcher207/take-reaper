@@ -32,7 +32,7 @@ The Reaper panel talks to the Take web app over HTTPS. Your collaborator doesn't
 
 1. Open Take in REAPER, open **Settings**, then click **Connect to Take**.
 2. Approve the connection in your browser.
-3. Choose a project. Its owner needs a paid plan to use the REAPER client.
+3. Choose a project. Its owner needs a paid subscription, or must be in their 14-day free trial, to use the REAPER client.
 
 Manual server and API token settings are available in Settings under **Advanced connection settings**.
 
@@ -92,3 +92,5 @@ Free: web app, text comments, stem and rough uploads, 5GB storage.
 $8/month: Reaper integration, voice memos, cut and loop proposals, 100GB storage, 12-month history, public wrap pages.
 
 Project owner pays. Collaborators ride along.
+
+Every new account gets the paid features free for its first 14 days, no card. Storage stays at 5GB until the owner subscribes.

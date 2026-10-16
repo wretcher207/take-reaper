@@ -127,26 +127,24 @@ runs a script inside the already-running REAPER instance.
 **Nothing is stranded.** Both repos clean and pushed: take-reaper `693a7aa`,
 take `b4e767b`.
 
-## Ship checklist for the NEXT release (order matters, all steps verified 2026-08-05)
+## Ship checklist for the NEXT release (order matters; verified 2026-08-05, steps 2 and 4 updated 2026-10-01 for Neon and Netlify)
 
 1. **Smoke-test in live REAPER** — load projects, open one, push a stem (watch
    the upload percentage), Import all, post a comment, idle 30+ seconds
    (comment auto-refresh), voice memo on a non-default input, propose a cut.
-2. **If there's a new migration, apply it to prod Supabase first** (dashboard
-   paste; `supabase db push` may need
-   `supabase migration repair --status applied 20260608210000` — MEMORY.md
-   2026-06-08). Note the Vercel GitHub integration auto-deploys on ANY push to
-   take's main — a push can leapfrog an unapplied migration, so apply before
-   pushing server code that needs it.
+2. **If there's a new migration, apply it to Neon first** (in the take repo,
+   `scripts/neon-dry-run.mjs`, then `scripts/neon-apply.mjs`). A push to take's main
+   that touches `apps/web/**` deploys production to Netlify through GitHub Actions,
+   so apply before pushing server code that needs it.
 3. **Bump `-- @version` in Take.lua AND add the matching
    `<version name="X.Y.Z">` block to index.xml** — publish.bat refuses to run
    without the index block.
 4. **Run `publish.bat`** — runs tools/check.js, copies Take.lua + index.xml into
    the take repo (both locations), pushes both repos, verifies takeaudio.com.
-   No vercel CLI on this box; the take push auto-deploys production anyway, so
-   the script's immediate verify may warn — re-check the live index a minute
-   later. Commit author must be `davidrussell112688@gmail.com` or Vercel Hobby
-   blocks the build (repo-local git identity already set in both repos).
+   Pushing take's main deploys production to Netlify through GitHub Actions, and
+   the script waits for the live feed. Afterwards check the "Deploy to Netlify" run
+   and the version in the live index.xml. The commit-author rule came from Vercel
+   Hobby, which no longer deploys Take.
 
 ## Testing without REAPER
 

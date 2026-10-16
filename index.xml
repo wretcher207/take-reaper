@@ -9,7 +9,7 @@
       <metadata>
         <description><![CDATA[Take is a docked panel for working on songs with other people. Pull a collaborator's stems onto your timeline at their timecode, push a rough mix in one click, read and answer comments pinned to the second they are about, and record a voice memo without leaving the session.
 
-Requires ReaImGui (install it from ReaPack). The script is free to install; connecting it needs a Take account on the paid plan ($8/month, paid by the project owner, collaborators ride along). The web app at takeaudio.com is free.]]></description>
+Requires ReaImGui (install it from ReaPack). The script is free to install; connecting it needs a Take account on the paid plan ($8/month, paid by the project owner, collaborators ride along). Every new account gets the paid features free for its first 14 days, no card. The web app at takeaudio.com is free.]]></description>
         <link rel="website">https://takeaudio.com</link>
         <link rel="website" href="https://github.com/wretcher207/take-reaper">Source on GitHub</link>
       </metadata>
